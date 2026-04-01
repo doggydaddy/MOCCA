@@ -16,7 +16,7 @@ parser = argparse.ArgumentParser(
                     )
 parser.add_argument('-nPerm', '--numberPermutations', 
                     type=int, 
-                    help='number of permutations', 
+                    help='number of permutations (excluding the original grouping row prepended as row 0)', 
                     default=5000)
 parser.add_argument('-nA', '--numberGroupA', 
                     type=int, 
@@ -75,16 +75,23 @@ def genPermutations(nA, nB, nperm):
     M = nA
     N = nA + nB
     max_unique = combination(N, M)
-    if nperm > max_unique:
+    # The original grouping (0..nA-1) occupies one slot, so at most
+    # max_unique-1 distinct permutations remain for the random draws.
+    if nperm > max_unique - 1:
         raise ValueError(
-            f"Requested {nperm} unique permutations, but only {max_unique} exist "
-            f"for nA={nA}, nB={nB}."
+            f"Requested {nperm} unique permutations, but only {max_unique - 1} exist "
+            f"for nA={nA}, nB={nB} (one slot is reserved for the original grouping row)."
         )
+
+    # Row 0 is always the original grouping: indices 0, 1, ..., nA-1.
+    # It must be excluded from the random permutations.
+    original_grouping = tuple(range(nA))
 
     output = np.empty((nperm, M), dtype=np.uint16)
     print(output.shape)
 
     seen = set()
+    seen.add(original_grouping)  # reserve row 0 so it is never drawn again
     p = 0
     attempts = 0
     progress_step = max(1, nperm // 20)
@@ -103,7 +110,7 @@ def genPermutations(nA, nB, nperm):
         if p % progress_step == 0 or p == nperm:
             print(f"  generated {p}/{nperm} unique permutations (attempts={attempts})")
 
-    return output
+    return original_grouping, output
 
 def combination(n, k):
     '''
@@ -130,10 +137,15 @@ def choose(n, k):
 
 print("generating", str(nrp), "permutations")
 start = perf_counter()
-generated_permutations = genPermutations(nA, nB, nrp)
+original_grouping, generated_permutations = genPermutations(nA, nB, nrp)
 end = perf_counter()
 print("took", str(end-start), "seconds")
 
 print("saving ...")
-np.savetxt(outputfile, generated_permutations, fmt='% 4d')
+# Row 0: original grouping (observed statistic for the CUDA kernel).
+# Rows 1..nrp: the nrp random permutations.
+original_row = np.array(original_grouping, dtype=np.uint16).reshape(1, -1)
+all_rows = np.vstack([original_row, generated_permutations])
+np.savetxt(outputfile, all_rows, fmt='% 4d')
+print(f"saved {nrp + 1} rows ({nrp} permutations + 1 original grouping row) to {outputfile}")
 print("all done!")
