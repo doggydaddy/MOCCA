@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter, QPushButton,
     QHBoxLayout, QLabel, QCheckBox, QSlider, QFileDialog, QMessageBox,
     QProgressDialog, QDialog, QVBoxLayout, QComboBox, QDialogButtonBox,
-    QColorDialog
+    QColorDialog, QSpinBox
 )
 from PyQt5.QtGui import QPixmap, QColor, QIcon
 from PyQt5.QtCore import Qt, QTimer
@@ -129,11 +129,82 @@ class MainWindow(QMainWindow):
         self.preview_frame = 0
     
     def load_data_dialog(self):
+        from mocca_gui.data_loader import EdgeDataLoaderWorker
+        from coffee_dac_pipeline import cache_exists
+        from coffee_dac_pipeline_v2 import cache_exists_v2
+
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Edge CSV", "", "CSV Files (*.csv)"
         )
         if not path:
             return
+
+        has_v1 = cache_exists(path)
+        has_v2 = cache_exists_v2(path)
+
+        # --- Build the prompt dialog when any cache exists ---
+        pipeline = 'v1'
+        use_cache = False
+        recut = None
+
+        if has_v1 or has_v2:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Cached results found")
+            layout = QVBoxLayout(dialog)
+
+            cache_info = []
+            if has_v2:
+                cache_info.append("  • v2 cache (processed CSV + linkage matrix)")
+            if has_v1:
+                cache_info.append("  • v1 cache (processed CSV + linkage matrix)")
+            layout.addWidget(QLabel(
+                "Previously processed results were found for this dataset:\n" +
+                "\n".join(cache_info) +
+                "\n\nHow would you like to proceed?"
+            ))
+
+            combo = QComboBox(dialog)
+            if has_v2:
+                combo.addItem("Load existing v2 results (fast)", ("v2", True))
+            if has_v1:
+                combo.addItem("Load existing v1 results (fast)", ("v1", True))
+            combo.addItem("Re-process with pipeline v2 (slow)", ("v2", False))
+            combo.addItem("Re-process with pipeline v1 (slow)", ("v1", False))
+            layout.addWidget(combo)
+
+            # Recut spinbox — only relevant when loading v2 cache
+            recut_widget = QWidget(dialog)
+            recut_layout = QHBoxLayout(recut_widget)
+            recut_layout.setContentsMargins(0, 0, 0, 0)
+            recut_label = QLabel("Cut into N networks (v2 cache only):")
+            recut_spin = QSpinBox(dialog)
+            recut_spin.setRange(2, 50)
+            recut_spin.setValue(5)
+            recut_layout.addWidget(recut_label)
+            recut_layout.addWidget(recut_spin)
+            layout.addWidget(recut_widget)
+
+            def update_recut_visibility():
+                choice_pipeline, choice_cache = combo.currentData()
+                recut_widget.setVisible(choice_pipeline == 'v2' and choice_cache)
+            combo.currentIndexChanged.connect(update_recut_visibility)
+            update_recut_visibility()
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            layout.addWidget(buttons)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+
+            if dialog.exec_() != QDialog.Accepted:
+                return
+
+            pipeline, use_cache = combo.currentData()
+            if pipeline == 'v2' and use_cache:
+                recut = recut_spin.value()
+        else:
+            # No cache at all — default to v2 processing
+            pipeline = 'v2'
+            use_cache = False
 
         self.progress_dialog = QProgressDialog(
             "Loading data...", "Cancel", 0, 100, self
@@ -141,7 +212,12 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setWindowModality(Qt.WindowModal)
         self.progress_dialog.setValue(0)
 
-        self.loader_worker = EdgeDataLoaderWorker(path)
+        self.loader_worker = EdgeDataLoaderWorker(
+            path,
+            use_cache=use_cache,
+            pipeline=pipeline,
+            recut=recut,
+        )
 
         self.loader_worker.progress.connect(self.progress_dialog.setValue)
         self.loader_worker.finished.connect(self.on_data_loaded)
@@ -152,7 +228,7 @@ class MainWindow(QMainWindow):
 
     def on_data_loaded(self, result):
         self.edges_net = result['edges_net']
-        self.linkage_matrix = result['linkage_matrix']
+        self.linkage_matrix = result.get('linkage_matrix')
         self.tree_manager.populate(self.edges_net)
         self.plotter.clear()
         self.progress_dialog.close()
