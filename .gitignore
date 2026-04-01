@@ -1,3 +1,33 @@
+.venv/
+__pycache__/
+*.pyc
+04_coffee-dac/data
+
 test*
 sim*
 intermediate*
+
+data/
+templates/
+
+# NIfTI images
+*.nii.gz
+*.nii
+
+# Large data files
+*.csv
+*.npy
+
+# CC matrix outputs (01_cudaCC)
+*.ccmatrix
+*.ccm
+
+# Permutation test results (02_cudaPerm / 03_prepResultsForVisualization)
+*.permout
+*.permres
+
+# Build artefacts
+**/build/*
+
+# STL meshes are kept (04_coffee-dac)
+!*.stl

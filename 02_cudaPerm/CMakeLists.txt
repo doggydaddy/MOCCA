@@ -17,7 +17,7 @@ endif()
 find_package(CUDA REQUIRED)
 
 add_executable(permutationTest_cuda permutationTest_cuda.cu)
-target_compile_options(permutationTest_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_50,code=sm_50 -Xcompiler=-fopenmp>)
+target_compile_options(permutationTest_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
 target_link_libraries(permutationTest_cuda PRIVATE gomp)
 
 add_executable(permutationTest_omp permutationTest_omp.c)

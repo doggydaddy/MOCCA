@@ -4,7 +4,8 @@ include(CheckLanguage)
 check_language(CUDA)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 75)
+    # 75 = Turing (RTX 2000), 86 = Ampere (RTX 3000), 89 = Ada (RTX 4000)
+    set(CMAKE_CUDA_ARCHITECTURES 89)
 endif()
 
 include_directories(nifticlib-2.0.0/include)
@@ -37,4 +38,5 @@ target_link_libraries(calcCC_div gomp fslio niftiio znz m z)
 
 # copile cudaCC_div
 add_executable(cudaCC_div cudaCC_div.cu)
-target_link_libraries(cudaCC_div fslio niftiio znz m z)
+target_compile_options(cudaCC_div PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
+target_link_libraries(cudaCC_div gomp fslio niftiio znz m z)

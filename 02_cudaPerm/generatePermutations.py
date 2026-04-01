@@ -5,6 +5,7 @@ import numpy as np
 import argparse
 import random
 import sys
+import math
 from time import perf_counter
 
 parser = argparse.ArgumentParser(
@@ -47,28 +48,16 @@ def genMfromN(nA, nB, onehot=False):
 
     N = nA + nB
     M = nA
-    i = 0 
-    rnd_indices = np.zeros(nA) 
-    while i < M:
-        a_rnd_num = random.randrange(0, N-1)
-        skip_flag = 0
-        for j in range(i):
-            if rnd_indices[j] == a_rnd_num:
-                # this is a duplicate, regen number
-                skip_flag = 1
-                continue
-
-        if skip_flag == 0:
-            rnd_indices[i] = a_rnd_num
-            i += 1
+    # random.sample is without replacement and correctly samples [0, N-1].
+    rnd_indices = sorted(random.sample(range(N), M))
 
     if onehot:
-        onehot_output = np.zeros(N, type=np.uint16)
+        onehot_output = np.zeros(N, dtype=np.uint16)
         for k in range(M):
-            onehot_output[ int(rnd_indices[k]) ] = 1
+            onehot_output[int(rnd_indices[k])] = 1
         return onehot_output
     else:
-        return sorted(rnd_indices)
+        return rnd_indices
 
 def genPermutations(nA, nB, nperm):
     '''
@@ -85,34 +74,34 @@ def genPermutations(nA, nB, nperm):
 
     M = nA
     N = nA + nB
-    output = np.zeros((nperm, M))
+    max_unique = combination(N, M)
+    if nperm > max_unique:
+        raise ValueError(
+            f"Requested {nperm} unique permutations, but only {max_unique} exist "
+            f"for nA={nA}, nB={nB}."
+        )
+
+    output = np.empty((nperm, M), dtype=np.uint16)
     print(output.shape)
+
+    seen = set()
     p = 0
+    attempts = 0
+    progress_step = max(1, nperm // 20)
+
     while p < nperm:
-        redo_flag = 0
-        if p == 0: # first iteration
+        a_perm = tuple(genMfromN(nA, nB))
+        attempts += 1
 
-            a_perm = genMfromN(nA, nB)
-            output[p, :] = a_perm
+        if a_perm in seen:
+            continue
 
-        else: # p > 0
+        seen.add(a_perm)
+        output[p, :] = a_perm
+        p += 1
 
-            a_perm = genMfromN(nA, nB)
-
-            for pp in range(p):
-                matches = 0
-                for i in range(M):
-                    if output[pp, i] != a_perm[i]:
-                        continue
-                    else:
-                        matches += 1
-                if np.sum(matches) == M: # the indices are identical to pp, generate new permutation
-                    redo_flag = 1
-                    continue 
-
-        if redo_flag != 1: 
-            output[p, :] = a_perm
-            p += 1
+        if p % progress_step == 0 or p == nperm:
+            print(f"  generated {p}/{nperm} unique permutations (attempts={attempts})")
 
     return output
 
@@ -123,7 +112,7 @@ def combination(n, k):
     computes the combination by formula, 
     which is probably will not translate well to C/C++
     '''
-    return int( np.math.factorial(n) / (np.math.factorial(k)*np.math.factorial(n-k) ) )
+    return int(math.factorial(n) / (math.factorial(k) * math.factorial(n-k)))
 
 def choose(n, k):
     '''

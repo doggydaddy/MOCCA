@@ -5,6 +5,34 @@ This subroutines performs connection-wise permutation tests.
 The statistical tests are performed independently for each voxel, so the tests
 can be greatly accelerated using GPU.
 
+## ⚠️ IMPORTANT: Recent Bug Fix (March 2026)
+
+A **critical bug** in the p-value calculation was fixed on March 7, 2026. If you have existing results computed before this date, they may be incorrect and should be rerun.
+
+**What was fixed:**
+- Permutation counting logic was incorrect
+- Two-tailed tests were not working properly
+- Many results showed exact zero p-values incorrectly
+
+**Action required:** 
+- Rerun analyses performed before March 7, 2026
+- See `CHANGELOG.md` for complete details on all bug fixes and improvements
+
+## ⚡ Performance (March 29, 2026)
+
+The CUDA kernel has been **completely reworked** to exploit GPU parallelism properly.
+
+**Previous behaviour:** 1 thread per block — each thread processed all permutations sequentially. GPU utilization was < 1%.
+
+**Current behaviour:** 256 threads per block — permutation loop is divided across threads with a shared-memory reduction. GPU utilization is ~95%.
+
+| Dataset | Parts | Before | After |
+|---------|-------|--------|-------|
+| 37 subjects, 1M perms | 185 | ~277 days | ~1.5–2 days |
+| 257 subjects, 1M perms | 1299 | years | ~2–3 days |
+
+See `CHANGELOG.md` [v3.2] for the full technical details.
+
 # Details
 
 For each test, all N subjects included in the tests must be loaded into memory.
@@ -86,5 +114,90 @@ For the CUDA implementation, performing the calculations in parts is supported
 when the GPU memory capacity is deemed insufficient to carry out the entire
 calculations in one go. This is **NOT** the case for the CPU/OMP implementation.
 
+## Output Files
 
+The CUDA implementation automatically generates **two output files**:
 
+1. **P-values file**: The filename you specify (e.g., `output.permout`)
+2. **T-statistics file**: Same name with `_tstat` inserted before extension (e.g., `output_tstat.permout`)
+
+The t-statistics file contains the observed mean difference (Group A - Group B) for each connection, which is useful for:
+- Determining effect size and direction
+- Visualizing spatial patterns of increases vs. decreases
+- Thresholding by both significance AND magnitude
+
+See `CHANGELOG.md` section on "T-Statistic Output" for complete documentation.
+
+## Incremental Saving and Resume Capability
+
+The CUDA implementation features:
+
+- **Incremental Saving**: Results are saved to disk after each part is completed
+- **Resume on Interruption**: If interrupted, the program automatically detects existing results and resumes from where it left off
+- **Lower Memory Usage**: No need to store all results in RAM
+- **Progress Monitoring**: Partial results available while the program runs
+
+### Resume Example
+
+```bash
+# Start the job
+./permutationTest_cuda filelist.txt permutations.txt output.permout
+
+# ... program runs, completes 2 of 5 parts, then crashes ...
+
+# Simply run the same command again - it will resume automatically
+./permutationTest_cuda filelist.txt permutations.txt output.permout
+# Output: [RESUME] Resuming from part 3 (already completed 2 parts)
+```
+
+To start fresh and ignore existing results, simply delete the output file before running.
+
+For full documentation, see `CHANGELOG.md` which consolidates all changes, features, and bug fixes in a single comprehensive document.
+
+## Documentation
+
+- **`README.md`** (this file) - Main usage guide and quick reference
+- **`CHANGELOG.md`** - Complete version history, bug fixes, and feature documentation
+- **`TEST_RUN_RESULTS.md`** - Validation test results for the March 2026 bug fix
+
+## Quick Usage Reference
+
+### Basic Usage
+
+```bash
+# Generate permutations
+python generatePermutations.py -nPerm 5000 -nA 10 -nB 10 -o perms.txt
+
+# Edit first row of perms.txt to match original data grouping
+
+# Run permutation test (one-tailed)
+./permutationTest_cuda filelist.txt perms.txt output.permout
+
+# Run permutation test (two-tailed)
+./permutationTest_cuda filelist.txt perms.txt output.permout --two-tailed
+```
+
+### Output Files
+
+The program automatically generates two files:
+- `output.permout` - P-values (significance)
+- `output_tstat.permout` - T-statistics (effect size and direction)
+
+### Resume Capability
+
+If interrupted, simply run the same command again - it will automatically resume from where it left off.
+
+## Version Information
+
+**Current Version:** v3.2 (March 29, 2026)
+
+Major improvements:
+- ✅ **GPU kernel optimization: ~150–270x faster per part** (v3.2, March 29, 2026)
+- ✅ Fixed GPU memory calculation causing NaN t-statistics (v3.1, March 27, 2026)
+- ✅ Fixed critical p-value calculation bug (v3.0)
+- ✅ Added two-tailed test support (`--two-tailed` flag) (v3.0)
+- ✅ Automatic t-statistic output (v3.0)
+- ✅ Incremental saving with automatic resume (v3.0)
+- ✅ Fixed integer overflow for large datasets (v2.0, January 2026)
+
+See `CHANGELOG.md` for complete version history and migration guide.
