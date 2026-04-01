@@ -48,9 +48,9 @@ OUT_STL  = os.path.join(SCRIPT_DIR,   'brain3mm_gm.stl')
 # ---------------------------------------------------------------------------
 # Tuning parameters
 # ---------------------------------------------------------------------------
-# Gaussian pre-smooth σ (in 1mm voxels). 1.0 tames staircase noise without
-# blurring sulcal folds; increase to ~1.5 for a smoother-looking surface.
-SMOOTH_SIGMA = 1.0
+# Gaussian pre-smooth σ (in 1mm voxels). 0.5 tames staircase noise while
+# preserving gyral folds better than the previous σ=1.0.
+SMOOTH_SIGMA = 0.5
 
 # Marching-cubes isovalue at the GM/CSF boundary.
 # The 1mm template runs 0-119; WM peak ~108-114, GM ~60-105, CSF/BG ≤30.
@@ -59,11 +59,13 @@ MC_LEVEL = 30.0
 
 # Post-MC surface operations (applied in PyVista)
 # Decimation target – keep this fraction of triangles (0-1).
-# 0.08 retains ~8 % of raw MC triangles, still preserving all major folds.
-DECIMATE_TARGET = 0.08
+# 0.40 retains ~40% of raw MC triangles, preserving gyri/sulci detail.
+# (Previous value was 0.08 which destroyed most surface detail.)
+DECIMATE_TARGET = 0.40
 
 # Laplacian smoothing passes on the decimated mesh.
-SMOOTH_PASSES = 50
+# 15 passes is enough to remove MC staircase without blurring gyral folds.
+SMOOTH_PASSES = 15
 
 # ---------------------------------------------------------------------------
 # Load data
