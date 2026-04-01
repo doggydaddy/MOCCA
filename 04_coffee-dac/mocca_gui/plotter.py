@@ -72,7 +72,6 @@ class NetworkPlotter:
             "ambient": 0.3, "diffuse": 0.8,
             "show_edges": True, "edge_color": "#888888", "edge_opacity": 0.08,
         },                                                                                   False),
-        ("brain3mm.stl",       0.02, "#D8D8D8", False, {},                                  False),
     ]
 
     def __init__(self, plotter, brain_mesh_path=None, brain_meshes=None):
