@@ -138,12 +138,9 @@ class NetworkPlotter:
         self.plotter.render()
 
     def clear(self):
-        """Clear edge actors only — brain meshes stay persistent."""
-        # Remove all actors except the brain mesh ones
-        brain_actor_set = {a for a, _ in self._live_brain_actors}
-        for actor in list(self.plotter.actors.values()):
-            if actor not in brain_actor_set:
-                self.plotter.remove_actor(actor)
+        """Clear all actors instantly, then restore persistent brain meshes."""
+        self.plotter.clear()
+        self._add_brain_meshes()
 
     def draw_selection(
         self,
