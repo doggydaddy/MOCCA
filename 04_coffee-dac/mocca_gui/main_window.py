@@ -52,7 +52,7 @@ class MainWindow(QMainWindow):
 
         # PyVista plotter
         self.plotter_widget = QtInteractor()
-        self.plotter = NetworkPlotter(self.plotter_widget.interactor, brain_mesh_path="test.stl")
+        self.plotter = NetworkPlotter(self.plotter_widget.interactor)
         splitter.addWidget(self.plotter_widget)
 
         # Tree manager

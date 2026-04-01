@@ -81,10 +81,41 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     return centroid_edge, boxes
 
 class NetworkPlotter:
-    def __init__(self, plotter, brain_mesh_path):
+    # Default brain mesh layers: (filename, opacity, color)
+    DEFAULT_BRAIN_MESHES = [
+        ("brain3mm_wm.stl",    0.15, "white"),
+        ("brain3mm_gm.stl",    0.10, "grey"),
+        ("brain3mm_outer.stl", 0.05, "lightgrey"),
+        ("brain3mm.stl",       0.03, "lightgrey"),
+    ]
+
+    def __init__(self, plotter, brain_mesh_path=None, brain_meshes=None):
+        """
+        Parameters
+        ----------
+        plotter          : pyvista interactor
+        brain_mesh_path  : str, legacy single-mesh path (kept for compatibility)
+        brain_meshes     : list of (path, opacity, color) tuples.
+                           If provided, overrides brain_mesh_path.
+                           If neither is given, DEFAULT_BRAIN_MESHES is used.
+        """
         self.plotter = plotter
-        self.brain_mesh_path = brain_mesh_path
-        self.brain_mesh = pv.read(brain_mesh_path)
+
+        if brain_meshes is not None:
+            self._brain_meshes = brain_meshes
+        elif brain_mesh_path is not None:
+            # legacy: single mesh at default opacity
+            self._brain_meshes = [(brain_mesh_path, 0.10, "grey")]
+        else:
+            self._brain_meshes = self.DEFAULT_BRAIN_MESHES
+
+        # Pre-load all brain meshes
+        self._brain_mesh_actors = []
+        for path, _opacity, _color in self._brain_meshes:
+            try:
+                self._brain_mesh_actors.append((pv.read(path), _opacity, _color))
+            except Exception as e:
+                print(f"Warning: could not load brain mesh '{path}': {e}")
 
         self.thicknesses = {}
         self.curvatures = {}
@@ -97,7 +128,8 @@ class NetworkPlotter:
 
     def clear(self):
         self.plotter.clear()
-        self.plotter.add_mesh(self.brain_mesh, opacity=0.1, color='grey')
+        for mesh, opacity, color in self._brain_mesh_actors:
+            self.plotter.add_mesh(mesh, opacity=opacity, color=color)
 
     def draw_selection(
         self,
