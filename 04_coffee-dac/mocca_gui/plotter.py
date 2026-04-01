@@ -15,13 +15,14 @@ def plotline_ijk(plotter, edge, color, offset_multiplier=1.0, line_width=3, opac
     m = ((a + b) / 2) + offset
     spline_points = np.vstack((a, m, b))
     spline = pv.Spline(spline_points, 32)
-    plotter.add_mesh(
+    actor = plotter.add_mesh(
         spline,
         color=color[:3],
         line_width=line_width,
         render_lines_as_tubes=True,
         opacity=opacity
     )
+    return actor
 
 def add_endpoints(plotter, edge, color, size_scale=1.0, opacity=0.2):
     a = edge[0:3]
@@ -29,7 +30,8 @@ def add_endpoints(plotter, edge, color, size_scale=1.0, opacity=0.2):
     points = pv.PolyData(np.vstack([a, b]))
     geom = pv.Box(bounds=[-0.5, 0.5, -0.5, 0.5, -0.5, 0.5])
     glyphs = points.glyph(geom=geom, scale=False, factor=np.sqrt(3)/4 * size_scale * 2)
-    plotter.add_mesh(glyphs, color=color[:3], opacity=opacity)
+    actor = plotter.add_mesh(glyphs, color=color[:3], opacity=opacity)
+    return actor
 
 def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     start_points = edges_bundle[:, 0:3]
@@ -123,6 +125,8 @@ class NetworkPlotter:
         # Add brain meshes once and keep their actors for live opacity updates
         self._live_brain_actors = []
         self._add_brain_meshes()
+        # Separate list tracking only edge/glyph actors added during draw_selection
+        self._edge_actors = []
 
     def _add_brain_meshes(self):
         """Add brain mesh layers to the plotter and store the returned actors."""
@@ -162,9 +166,11 @@ class NetworkPlotter:
         self.plotter.render()
 
     def clear(self):
-        """Clear all actors instantly, then restore persistent brain meshes."""
-        self.plotter.clear()
-        self._add_brain_meshes()
+        """Remove only edge actors — brain mesh actors stay completely untouched."""
+        for actor in self._edge_actors:
+            self.plotter.remove_actor(actor)
+        self._edge_actors = []
+        self.plotter.render()
 
     def draw_selection(
         self,
@@ -174,7 +180,7 @@ class NetworkPlotter:
         stop_flag=None,
         progress_callback=None
     ):
-        self.clear()
+        self.clear()   # removes previous edge actors only; brain meshes untouched
 
         total_edges = sum(
             len(edges_net[
@@ -228,11 +234,11 @@ class NetworkPlotter:
                     # generate centroid edge
                     centroid_edge, boxes = generate_centroid_edge(
                         edges,
-                        plotter =self.plotter,
+                        plotter=self.plotter,
                         color=color
                     )
-                
-                    plotline_ijk(
+                    self._edge_actors.extend(boxes)
+                    actor = plotline_ijk(
                         self.plotter,
                         centroid_edge,
                         color=color,
@@ -240,8 +246,9 @@ class NetworkPlotter:
                         line_width=self.thicknesses.get((fcn, int(b)), 3),
                         opacity=self.opacities.get((fcn, int(b)), 0.8)
                     )
+                    self._edge_actors.append(actor)
 
-                else: 
+                else:
 
                     for edge in edges:
                         if stop_flag and stop_flag():
@@ -252,7 +259,7 @@ class NetworkPlotter:
                         curvature = self.curvatures.get((fcn, int(b)), 1.0)
                         endpoint_size = self.endpoint_sizes.get((fcn, int(b)), 1.0)
 
-                        plotline_ijk(
+                        actor = plotline_ijk(
                             self.plotter,
                             edge,
                             color=color,
@@ -260,15 +267,17 @@ class NetworkPlotter:
                             line_width=thickness,
                             opacity=self.opacities.get((fcn, int(b)), 0.8)
                         )
+                        self._edge_actors.append(actor)
 
                         if endpoint_visible:
-                            add_endpoints(
+                            ep_actor = add_endpoints(
                                 self.plotter,
                                 edge,
                                 color=color,
                                 size_scale=endpoint_size,
                                 opacity=self.opacities.get((fcn, int(b)), 0.8)
                             )
+                            self._edge_actors.append(ep_actor)
 
                         edges_drawn += 1
 
