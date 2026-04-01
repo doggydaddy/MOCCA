@@ -26,21 +26,10 @@ def plotline_ijk(plotter, edge, color, offset_multiplier=1.0, line_width=3, opac
 def add_endpoints(plotter, edge, color, size_scale=1.0, opacity=0.2):
     a = edge[0:3]
     b = edge[3:6]
-    d = np.sqrt(3)/4 * size_scale
-
-    box_a = pv.Box([
-        a[0] - d, a[0] + d,
-        a[1] - d, a[1] + d,
-        a[2] - d, a[2] + d
-    ])
-    box_b = pv.Box([
-        b[0] - d, b[0] + d,
-        b[1] - d, b[1] + d,
-        b[2] - d, b[2] + d
-    ])
-
-    plotter.add_mesh(box_a, color=color[:3], opacity=opacity)
-    plotter.add_mesh(box_b, color=color[:3], opacity=opacity)
+    points = pv.PolyData(np.vstack([a, b]))
+    geom = pv.Box(bounds=[-0.5, 0.5, -0.5, 0.5, -0.5, 0.5])
+    glyphs = points.glyph(geom=geom, scale=False, factor=np.sqrt(3)/4 * size_scale * 2)
+    plotter.add_mesh(glyphs, color=color[:3], opacity=opacity)
 
 def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     start_points = edges_bundle[:, 0:3]
@@ -61,23 +50,12 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     boxes = []
     if plotter is not None:
         d = np.sqrt(3)/4 * 1.0
-        for point in start_points:
-            box = pv.Box([
-                point[0] - d, point[0] + d,
-                point[1] - d, point[1] + d,
-                point[2] - d, point[2] + d
-            ])
-            plotter.add_mesh(box, color=color[:3], opacity=0.2)
-            boxes.append(box)
-
-        for point in end_points:
-            box = pv.Box([
-                point[0] - d, point[0] + d,
-                point[1] - d, point[1] + d,
-                point[2] - d, point[2] + d
-            ])
-            plotter.add_mesh(box, color=color[:3], opacity=0.2)
-            boxes.append(box)
+        all_points = np.vstack([start_points, end_points])
+        cloud = pv.PolyData(all_points)
+        geom = pv.Box(bounds=[-0.5, 0.5, -0.5, 0.5, -0.5, 0.5])
+        glyphs = cloud.glyph(geom=geom, scale=False, factor=d * 2)
+        actor = plotter.add_mesh(glyphs, color=color[:3], opacity=0.2)
+        boxes.append(actor)
 
     return centroid_edge, boxes
 
