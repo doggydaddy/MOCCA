@@ -120,6 +120,10 @@ class MainWindow(QMainWindow):
         gif_panel = self.build_gif_settings_panel()
         bottom_layout.addWidget(gif_panel)
 
+        # Brain mesh opacity slider
+        brain_opacity_panel = self.build_brain_opacity_panel()
+        bottom_layout.addWidget(brain_opacity_panel)
+
         layout.addWidget(bottom_panel)
 
         self.data_loader = EdgeDataLoader(self)
@@ -637,6 +641,41 @@ class MainWindow(QMainWindow):
         oscillation = 5 * math.sin(frame * 2 * math.pi / 180)
         elevation = base_elevation + oscillation
         return azimuth, elevation
+
+    # ---------------- Brain opacity slider ------------------------
+
+    def build_brain_opacity_panel(self):
+        panel = QWidget()
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        layout.addWidget(QLabel("Brain Opacity:"))
+
+        self.brain_opacity_label = QLabel("50%")
+        layout.addWidget(self.brain_opacity_label)
+
+        self.brain_opacity_slider = QSlider(Qt.Horizontal)
+        self.brain_opacity_slider.setRange(0, 100)
+        self.brain_opacity_slider.setValue(50)   # default: half of base values
+        self.brain_opacity_slider.setTickInterval(10)
+        self.brain_opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.brain_opacity_slider.valueChanged.connect(self.on_brain_opacity_changed)
+        layout.addWidget(self.brain_opacity_slider)
+
+        return panel
+
+    def on_brain_opacity_changed(self, value):
+        scale = value / 100.0
+        self.brain_opacity_label.setText(f"{value}%")
+        self.plotter.set_brain_opacity(scale)
+        # Redraw brain meshes immediately without touching edge data
+        self.plotter.clear()
+        if self.edges_net is not None:
+            selection = self.tree_manager.get_selection()
+            if selection:
+                self.plotter.draw_selection(
+                    self.edges_net, selection, self.endpoint_checkbox.isChecked()
+                )
 
     # ---------------- Dendrogram Plotting ------------------------
 

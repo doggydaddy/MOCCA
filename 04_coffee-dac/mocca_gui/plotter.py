@@ -103,12 +103,17 @@ class NetworkPlotter:
         self.bundle_colors = {}  # Key: (fcn, bundle) → color index
         self.centroid_flags = {}  # (fcn, bundle) → True/False
         self.opacities = {}  # (fcn, bundle) → float
+        self.brain_opacity_scale = 0.5  # multiplier applied to all brain mesh opacities
 
+
+    def set_brain_opacity(self, scale):
+        """Set a global opacity multiplier (0.0–1.0) for all brain mesh layers."""
+        self.brain_opacity_scale = max(0.0, min(1.0, scale))
 
     def clear(self):
         self.plotter.clear()
-        for mesh, opacity, color in self._brain_mesh_actors:
-            self.plotter.add_mesh(mesh, opacity=opacity, color=color)
+        for mesh, base_opacity, color in self._brain_mesh_actors:
+            self.plotter.add_mesh(mesh, opacity=base_opacity * self.brain_opacity_scale, color=color)
 
     def draw_selection(
         self,
