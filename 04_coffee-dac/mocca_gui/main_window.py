@@ -20,6 +20,8 @@ from mocca_gui.dendrogram_plotter import show_dendrogram
 from mocca_gui.plot_worker import PlotWorker
 from mocca_gui.data_loader import EdgeDataLoaderWorker
 
+from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
+
 import pyvista as pv
 import math
 import os
@@ -238,7 +240,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load data first.")
             return
         selection = []
-        fcn_ids = sorted(set(self.edges_net[:,7].astype(int)))
+        fcn_ids = sorted(set(self.edges_net[:,NETWORK_COL].astype(int)))
         for f in fcn_ids:
             selection.append({"fcn": f, "bundle": "All"})
         self.plotter.draw_selection(
@@ -309,7 +311,7 @@ class MainWindow(QMainWindow):
 
         if dialog.exec_() == QDialog.Accepted:
             idx = combo.currentData()
-            self.plotter.bundle_colors[(fcn, bundle)] = idx
+            self.plotter.bundle_colors[(fcn, bundle)][:, BUNDLE_COL]= idx
 
             rgba = color_list[idx]
             button_widget.setStyleSheet(
@@ -325,7 +327,7 @@ class MainWindow(QMainWindow):
         from mocca_gui.colormap import my_colormap
 
         # Remove custom bundle color
-        self.plotter.bundle_colors[(fcn, bundle_id)] = None
+        self.plotter.bundle_colors[(fcn, bundle_id)][:, BUNDLE_COL]= None
         print(f"Bundle {bundle_id} in FCN {fcn} reset to FCN color.")
 
         # Check for custom FCN color stored under (fcn, "All")
@@ -382,7 +384,7 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             idx = combo.currentData()
 
-            self.plotter.bundle_colors[(fcn, 'All')] = idx
+            self.plotter.bundle_colors[(fcn, 'All')][:, BUNDLE_COL]= idx
 
             rgba = color_list[idx]
             button_widget.setStyleSheet(
@@ -456,7 +458,7 @@ class MainWindow(QMainWindow):
         key = (fcn, bundle)
         current = self.plotter.centroid_flags.get(key, False)
         new_state = not current
-        self.plotter.centroid_flags[key] = new_state
+        self.plotter.centroid_flags[key][:, BUNDLE_COL]= new_state
 
         if new_state:
             button_widget.setText("Centroid ✓")
@@ -469,12 +471,12 @@ class MainWindow(QMainWindow):
         # Determine if any bundle currently has centroid enabled
         all_on = any(
             self.plotter.centroid_flags.get((fcn, b), False)
-            for b in np.unique(self.edges_net[self.edges_net[:,7] == fcn][:,6])
+            for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL] == fcn][:,BUNDLE_COL])
         )
 
         new_state = not all_on
 
-        for b in np.unique(self.edges_net[self.edges_net[:,7] == fcn][:,6]):
+        for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL] == fcn][:,BUNDLE_COL]):
             self.plotter.centroid_flags[(fcn, int(b))] = new_state
 
         # Optionally update UI text for all bundle buttons
@@ -499,13 +501,13 @@ class MainWindow(QMainWindow):
 
         # Determine current global state (are any centroids on?)
         any_on = any(self.plotter.centroid_flags.get((int(f), int(b)), False)
-                    for f in np.unique(self.edges_net[:,7])
-                    for b in np.unique(self.edges_net[self.edges_net[:,7]==f][:,6]))
+                    for f in np.unique(self.edges_net[:,NETWORK_COL])
+                    for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL]==f][:,BUNDLE_COL]))
 
         new_state = not any_on  # Toggle
 
-        for f in np.unique(self.edges_net[:,7]):
-            for b in np.unique(self.edges_net[self.edges_net[:,7]==f][:,6]):
+        for f in np.unique(self.edges_net[:,NETWORK_COL]):
+            for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL]==f][:,BUNDLE_COL]):
                 self.plotter.centroid_flags[(int(f), int(b))] = new_state
 
         # Update centroid buttons in the tree view
@@ -646,12 +648,12 @@ class MainWindow(QMainWindow):
         Z = self.linkage_matrix
 
         # get number of FCNs
-        num_fcns = int(np.max(edges_net[:, 7])) + 1
+        num_fcns = int(np.max(edges_net[:, NETWORK_COL])) + 1
 
         def find_nth_largest_link(Z, n):
-            # Z[:, 2] contains the distances of the merges
+            # Z[:, 2][:, BUNDLE_COL]contains the distances of the merges
             distances = Z[:, 2]
-            sorted_distances = np.sort(distances)[::-1]  # descending order
+            sorted_distances = np.sort(distances)[::-1][:, BUNDLE_COL] # descending order
             if n > len(sorted_distances):
                 return None
             nth_distance = sorted_distances[n - 1]
@@ -661,14 +663,14 @@ class MainWindow(QMainWindow):
         cut_distance = find_nth_largest_link(Z, 5)
 
         # Get unique bundles
-        unique_bundles = np.unique(edges_net[:, 6])
+        unique_bundles = np.unique(edges_net[:, BUNDLE_COL])
 
         # Map bundle → FCN
         bundle_to_fcn = {}
         for b in unique_bundles:
-            fcn_ids = edges_net[edges_net[:, 6] == b, 7]
+            fcn_ids = edges_net[edges_net[:, BUNDLE_COL][:, BUNDLE_COL]== b, NETWORK_COL]
             fcn = int(fcn_ids[0]) if len(fcn_ids) > 0 else -1
-            bundle_to_fcn[int(b)] = fcn
+            bundle_to_fcn[int(b)][:, BUNDLE_COL]= fcn
 
         # Map FCNs → colors from my_colormap
         unique_fcns = sorted(set(bundle_to_fcn.values()))
@@ -681,7 +683,7 @@ class MainWindow(QMainWindow):
                 if hasattr(color_arr, "tolist")
                 else tuple(color_arr)
             )
-            fcn_colors[fcn] = color_tuple
+            fcn_colors[fcn][:, BUNDLE_COL]= color_tuple
 
         # Build labels
         labels = [
@@ -706,10 +708,10 @@ class MainWindow(QMainWindow):
                     if hasattr(color_arr, "tolist")
                     else tuple(color_arr)
                 )
-                bundle_to_color[b_int] = color_tuple
+                bundle_to_color[b_int][:, BUNDLE_COL]= color_tuple
             else:
                 # Default FCN color
-                bundle_to_color[b_int] = fcn_colors.get(fcn, (0.5, 0.5, 0.5, 1.0))
+                bundle_to_color[b_int][:, BUNDLE_COL]= fcn_colors.get(fcn, (0.5, 0.5, 0.5, 1.0))
 
         # Build fcn_to_color
         fcn_to_color = {}
@@ -728,7 +730,7 @@ class MainWindow(QMainWindow):
                 else tuple(color_arr)
             )
     
-            fcn_to_color[fcn] = color_tuple
+            fcn_to_color[fcn][:, BUNDLE_COL]= color_tuple
 
 
         return {

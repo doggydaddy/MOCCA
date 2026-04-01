@@ -6,6 +6,7 @@ from matplotlib.colors import ListedColormap
 from PyQt5.QtWidgets import QApplication
 
 from mocca_gui.colormap import my_colormap
+from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
 
 def plotline_ijk(plotter, edge, color, offset_multiplier=1.0, line_width=3, opacity=0.8):
     a = edge[0:3]
@@ -48,8 +49,8 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     centroid_start = np.mean(start_points, axis=0)
     centroid_end = np.mean(end_points, axis=0)
 
-    cluster_id = edges_bundle[0, 6]
-    network_id = edges_bundle[0, 7]
+    cluster_id = edges_bundle[0, BUNDLE_COL]
+    network_id = edges_bundle[0, NETWORK_COL]
 
     centroid_edge = np.concatenate([
         centroid_start,
@@ -143,12 +144,12 @@ class NetworkPlotter:
 
         total_edges = sum(
             len(edges_net[
-                (edges_net[:,7] == item['fcn']) &
-                (edges_net[:,6] == b)
+                (edges_net[:,NETWORK_COL] == item['fcn']) &
+                (edges_net[:,BUNDLE_COL] == b)
             ])
             for item in selection
             for b in (
-                np.unique(edges_net[edges_net[:,7]==item['fcn']][:,6])
+                np.unique(edges_net[edges_net[:,NETWORK_COL]==item['fcn']][:,BUNDLE_COL])
                 if item['bundle'] == "All"
                 else [item['bundle']]
             )
@@ -163,7 +164,7 @@ class NetworkPlotter:
             bundle = item['bundle']
 
             if bundle == "All":
-                bundles = np.unique(edges_net[edges_net[:,7]==fcn][:,6])
+                bundles = np.unique(edges_net[edges_net[:,NETWORK_COL]==fcn][:,BUNDLE_COL])
             else:
                 bundles = [bundle]
 
@@ -185,8 +186,8 @@ class NetworkPlotter:
                 use_centroid = self.centroid_flags.get((fcn, int(b)), False)
 
                 edges = edges_net[
-                    (edges_net[:,7] == fcn) &
-                    (edges_net[:,6] == b)
+                    (edges_net[:,NETWORK_COL] == fcn) &
+                    (edges_net[:,BUNDLE_COL] == b)
                 ]
 
                 if use_centroid and len(edges) > 0:
