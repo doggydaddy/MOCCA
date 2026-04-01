@@ -60,14 +60,19 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     return centroid_edge, boxes
 
 class NetworkPlotter:
-    # Default brain mesh layers: (filename, base_opacity, color, smooth_shading)
-    # base_opacity is the value at slider=100%; slider scales it linearly down to 0.
-    # smooth_shading=True computes per-vertex normals so gyri/sulci show relief.
+    # Each entry: (filename, base_opacity, color, smooth_shading, extra_kwargs)
+    # base_opacity is at slider=100%; default slider is 50% so actual start = base * 0.5
+    # Given the 3mm voxel resolution, gyri/sulci are limited in geometry but
+    # specular highlights + show_edges on GM bring out what relief exists.
     DEFAULT_BRAIN_MESHES = [
-        ("brain3mm_wm.stl",    0.30, "#8B7355", False),  # WM interior – flat ok
-        ("brain3mm_gm.stl",    0.25, "#C0C0C0", True),   # GM cortex – smooth shading for gyri/sulci
-        ("brain3mm_outer.stl", 0.10, "#D8D8D8", True),   # outer hull
-        ("brain3mm.stl",       0.05, "#D8D8D8", False),  # silhouette only
+        ("brain3mm_wm.stl",    0.18, "#8B7355", False, {}),
+        ("brain3mm_gm.stl",    0.15, "#B8B8B8", True,  {
+            "specular": 0.6, "specular_power": 20,
+            "ambient": 0.3, "diffuse": 0.8,
+            "show_edges": True, "edge_color": "#888888", "edge_opacity": 0.08,
+        }),
+        ("brain3mm_outer.stl", 0.05, "#D0D0D0", True,  {"specular": 0.3}),
+        ("brain3mm.stl",       0.03, "#D8D8D8", False, {}),
     ]
 
     def __init__(self, plotter, brain_mesh_path=None, brain_meshes=None):
@@ -95,12 +100,13 @@ class NetworkPlotter:
         for entry in self._brain_meshes:
             path, _opacity, _color = entry[0], entry[1], entry[2]
             _smooth = entry[3] if len(entry) > 3 else False
+            _kwargs = entry[4] if len(entry) > 4 else {}
             try:
                 mesh = pv.read(path)
                 if _smooth:
                     mesh = mesh.compute_normals(cell_normals=False, point_normals=True,
                                                 split_vertices=False, consistent_normals=True)
-                self._brain_mesh_actors.append((mesh, _opacity, _color, _smooth))
+                self._brain_mesh_actors.append((mesh, _opacity, _color, _smooth, _kwargs))
             except Exception as e:
                 print(f"Warning: could not load brain mesh '{path}': {e}")
 
@@ -120,13 +126,14 @@ class NetworkPlotter:
     def _add_brain_meshes(self):
         """Add brain mesh layers to the plotter and store the returned actors."""
         self._live_brain_actors = []
-        for mesh, base_opacity, color, smooth in self._brain_mesh_actors:
+        for mesh, base_opacity, color, smooth, kwargs in self._brain_mesh_actors:
             actor = self.plotter.add_mesh(
                 mesh,
                 opacity=base_opacity * self.brain_opacity_scale,
                 color=color,
                 smooth_shading=smooth,
                 lighting=True,
+                **kwargs,
             )
             self._live_brain_actors.append((actor, base_opacity))
 
