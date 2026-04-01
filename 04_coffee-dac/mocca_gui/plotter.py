@@ -60,12 +60,14 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     return centroid_edge, boxes
 
 class NetworkPlotter:
-    # Default brain mesh layers: (filename, opacity, color)
+    # Default brain mesh layers: (filename, base_opacity, color, smooth_shading)
+    # base_opacity is the value at slider=100%; slider scales it linearly down to 0.
+    # smooth_shading=True computes per-vertex normals so gyri/sulci show relief.
     DEFAULT_BRAIN_MESHES = [
-        ("brain3mm_wm.stl",    0.12, "#8B7355"),   # warm tan – WM interior, clearly distinct from GM
-        ("brain3mm_gm.stl",    0.07, "#C0C0C0"),   # silver – cortical GM surface
-        ("brain3mm_outer.stl", 0.03, "#D8D8D8"),   # very faint outer hull for overall brain shape
-        ("brain3mm.stl",       0.02, "#D8D8D8"),   # near-invisible full mesh for silhouette
+        ("brain3mm_wm.stl",    0.30, "#8B7355", False),  # WM interior – flat ok
+        ("brain3mm_gm.stl",    0.25, "#C0C0C0", True),   # GM cortex – smooth shading for gyri/sulci
+        ("brain3mm_outer.stl", 0.10, "#D8D8D8", True),   # outer hull
+        ("brain3mm.stl",       0.05, "#D8D8D8", False),  # silhouette only
     ]
 
     def __init__(self, plotter, brain_mesh_path=None, brain_meshes=None):
@@ -84,15 +86,21 @@ class NetworkPlotter:
             self._brain_meshes = brain_meshes
         elif brain_mesh_path is not None:
             # legacy: single mesh at default opacity
-            self._brain_meshes = [(brain_mesh_path, 0.10, "grey")]
+            self._brain_meshes = [(brain_mesh_path, 0.25, "grey", True)]
         else:
             self._brain_meshes = self.DEFAULT_BRAIN_MESHES
 
-        # Pre-load all brain meshes
+        # Pre-load all brain meshes; compute smooth normals where requested
         self._brain_mesh_actors = []
-        for path, _opacity, _color in self._brain_meshes:
+        for entry in self._brain_meshes:
+            path, _opacity, _color = entry[0], entry[1], entry[2]
+            _smooth = entry[3] if len(entry) > 3 else False
             try:
-                self._brain_mesh_actors.append((pv.read(path), _opacity, _color))
+                mesh = pv.read(path)
+                if _smooth:
+                    mesh = mesh.compute_normals(cell_normals=False, point_normals=True,
+                                                split_vertices=False, consistent_normals=True)
+                self._brain_mesh_actors.append((mesh, _opacity, _color, _smooth))
             except Exception as e:
                 print(f"Warning: could not load brain mesh '{path}': {e}")
 
@@ -105,15 +113,37 @@ class NetworkPlotter:
         self.opacities = {}  # (fcn, bundle) → float
         self.brain_opacity_scale = 0.5  # multiplier applied to all brain mesh opacities
 
+        # Add brain meshes once and keep their actors for live opacity updates
+        self._live_brain_actors = []
+        self._add_brain_meshes()
+
+    def _add_brain_meshes(self):
+        """Add brain mesh layers to the plotter and store the returned actors."""
+        self._live_brain_actors = []
+        for mesh, base_opacity, color, smooth in self._brain_mesh_actors:
+            actor = self.plotter.add_mesh(
+                mesh,
+                opacity=base_opacity * self.brain_opacity_scale,
+                color=color,
+                smooth_shading=smooth,
+                lighting=True,
+            )
+            self._live_brain_actors.append((actor, base_opacity))
 
     def set_brain_opacity(self, scale):
-        """Set a global opacity multiplier (0.0–1.0) for all brain mesh layers."""
+        """Update brain mesh opacity in-place without redrawing edges."""
         self.brain_opacity_scale = max(0.0, min(1.0, scale))
+        for actor, base_opacity in self._live_brain_actors:
+            actor.GetProperty().SetOpacity(base_opacity * self.brain_opacity_scale)
+        self.plotter.render()
 
     def clear(self):
-        self.plotter.clear()
-        for mesh, base_opacity, color in self._brain_mesh_actors:
-            self.plotter.add_mesh(mesh, opacity=base_opacity * self.brain_opacity_scale, color=color)
+        """Clear edge actors only — brain meshes stay persistent."""
+        # Remove all actors except the brain mesh ones
+        brain_actor_set = {a for a, _ in self._live_brain_actors}
+        for actor in list(self.plotter.actors.values()):
+            if actor not in brain_actor_set:
+                self.plotter.remove_actor(actor)
 
     def draw_selection(
         self,

@@ -668,14 +668,6 @@ class MainWindow(QMainWindow):
         scale = value / 100.0
         self.brain_opacity_label.setText(f"{value}%")
         self.plotter.set_brain_opacity(scale)
-        # Redraw brain meshes immediately without touching edge data
-        self.plotter.clear()
-        if self.edges_net is not None:
-            selection = self.tree_manager.get_selection()
-            if selection:
-                self.plotter.draw_selection(
-                    self.edges_net, selection, self.endpoint_checkbox.isChecked()
-                )
 
     # ---------------- Dendrogram Plotting ------------------------
 
