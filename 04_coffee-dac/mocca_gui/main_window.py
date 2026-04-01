@@ -651,16 +651,25 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(QLabel("Brain Opacity:"))
 
-        self.brain_opacity_label = QLabel("50%")
+        self.brain_opacity_label = QLabel("100%")
         layout.addWidget(self.brain_opacity_label)
 
         self.brain_opacity_slider = QSlider(Qt.Horizontal)
         self.brain_opacity_slider.setRange(0, 100)
-        self.brain_opacity_slider.setValue(50)   # default: half of base values
+        self.brain_opacity_slider.setValue(100)
         self.brain_opacity_slider.setTickInterval(10)
         self.brain_opacity_slider.setTickPosition(QSlider.TicksBelow)
         self.brain_opacity_slider.valueChanged.connect(self.on_brain_opacity_changed)
         layout.addWidget(self.brain_opacity_slider)
+
+        layout.addSpacing(20)
+
+        self.wm_checkbox = QCheckBox("Show WM")
+        self.wm_checkbox.setChecked(True)
+        self.wm_checkbox.stateChanged.connect(
+            lambda state: self.plotter.set_wm_visible(state == Qt.Checked)
+        )
+        layout.addWidget(self.wm_checkbox)
 
         return panel
 

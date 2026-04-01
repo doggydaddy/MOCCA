@@ -60,19 +60,18 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
     return centroid_edge, boxes
 
 class NetworkPlotter:
-    # Each entry: (filename, base_opacity, color, smooth_shading, extra_kwargs)
-    # base_opacity is at slider=100%; default slider is 50% so actual start = base * 0.5
-    # Given the 3mm voxel resolution, gyri/sulci are limited in geometry but
-    # specular highlights + show_edges on GM bring out what relief exists.
+    # Each entry: (filename, base_opacity, color, smooth_shading, extra_kwargs, is_wm)
+    # base_opacity is the actual opacity at slider=100%.
+    # is_wm=True marks layers toggled by the WM visibility checkbox.
     DEFAULT_BRAIN_MESHES = [
-        ("brain3mm_wm.stl",    0.18, "#8B7355", False, {}),
-        ("brain3mm_gm.stl",    0.15, "#B8B8B8", True,  {
+        ("brain3mm_wm.stl",    0.10, "#8B7355", False, {},                                  True),
+        ("brain3mm_gm.stl",    0.35, "#B8B8B8", True,  {
             "specular": 0.6, "specular_power": 20,
             "ambient": 0.3, "diffuse": 0.8,
             "show_edges": True, "edge_color": "#888888", "edge_opacity": 0.08,
-        }),
-        ("brain3mm_outer.stl", 0.05, "#D0D0D0", True,  {"specular": 0.3}),
-        ("brain3mm.stl",       0.03, "#D8D8D8", False, {}),
+        },                                                                                   False),
+        ("brain3mm_outer.stl", 0.04, "#D0D0D0", True,  {"specular": 0.3},                   False),
+        ("brain3mm.stl",       0.02, "#D8D8D8", False, {},                                  False),
     ]
 
     def __init__(self, plotter, brain_mesh_path=None, brain_meshes=None):
@@ -99,14 +98,15 @@ class NetworkPlotter:
         self._brain_mesh_actors = []
         for entry in self._brain_meshes:
             path, _opacity, _color = entry[0], entry[1], entry[2]
-            _smooth = entry[3] if len(entry) > 3 else False
-            _kwargs = entry[4] if len(entry) > 4 else {}
+            _smooth  = entry[3] if len(entry) > 3 else False
+            _kwargs  = entry[4] if len(entry) > 4 else {}
+            _is_wm   = entry[5] if len(entry) > 5 else False
             try:
                 mesh = pv.read(path)
                 if _smooth:
                     mesh = mesh.compute_normals(cell_normals=False, point_normals=True,
                                                 split_vertices=False, consistent_normals=True)
-                self._brain_mesh_actors.append((mesh, _opacity, _color, _smooth, _kwargs))
+                self._brain_mesh_actors.append((mesh, _opacity, _color, _smooth, _kwargs, _is_wm))
             except Exception as e:
                 print(f"Warning: could not load brain mesh '{path}': {e}")
 
@@ -117,7 +117,8 @@ class NetworkPlotter:
         self.bundle_colors = {}  # Key: (fcn, bundle) → color index
         self.centroid_flags = {}  # (fcn, bundle) → True/False
         self.opacities = {}  # (fcn, bundle) → float
-        self.brain_opacity_scale = 0.5  # multiplier applied to all brain mesh opacities
+        self.brain_opacity_scale = 1.0  # slider at 100% = full base opacities
+        self.wm_visible = True          # WM layer toggle
 
         # Add brain meshes once and keep their actors for live opacity updates
         self._live_brain_actors = []
@@ -126,22 +127,38 @@ class NetworkPlotter:
     def _add_brain_meshes(self):
         """Add brain mesh layers to the plotter and store the returned actors."""
         self._live_brain_actors = []
-        for mesh, base_opacity, color, smooth, kwargs in self._brain_mesh_actors:
+        for mesh, base_opacity, color, smooth, kwargs, is_wm in self._brain_mesh_actors:
+            effective_opacity = base_opacity * self.brain_opacity_scale
+            if is_wm and not self.wm_visible:
+                effective_opacity = 0.0
             actor = self.plotter.add_mesh(
                 mesh,
-                opacity=base_opacity * self.brain_opacity_scale,
+                opacity=effective_opacity,
                 color=color,
                 smooth_shading=smooth,
                 lighting=True,
                 **kwargs,
             )
-            self._live_brain_actors.append((actor, base_opacity))
+            self._live_brain_actors.append((actor, base_opacity, is_wm))
 
     def set_brain_opacity(self, scale):
         """Update brain mesh opacity in-place without redrawing edges."""
         self.brain_opacity_scale = max(0.0, min(1.0, scale))
-        for actor, base_opacity in self._live_brain_actors:
-            actor.GetProperty().SetOpacity(base_opacity * self.brain_opacity_scale)
+        for actor, base_opacity, is_wm in self._live_brain_actors:
+            if is_wm and not self.wm_visible:
+                actor.GetProperty().SetOpacity(0.0)
+            else:
+                actor.GetProperty().SetOpacity(base_opacity * self.brain_opacity_scale)
+        self.plotter.render()
+
+    def set_wm_visible(self, visible):
+        """Toggle white matter layer visibility instantly."""
+        self.wm_visible = visible
+        for actor, base_opacity, is_wm in self._live_brain_actors:
+            if is_wm:
+                actor.GetProperty().SetOpacity(
+                    base_opacity * self.brain_opacity_scale if visible else 0.0
+                )
         self.plotter.render()
 
     def clear(self):
