@@ -62,10 +62,10 @@ def generate_centroid_edge(edges_bundle, plotter=None, color=None):
 class NetworkPlotter:
     # Default brain mesh layers: (filename, opacity, color)
     DEFAULT_BRAIN_MESHES = [
-        ("brain3mm_wm.stl",    0.15, "white"),
-        ("brain3mm_gm.stl",    0.10, "grey"),
-        ("brain3mm_outer.stl", 0.05, "lightgrey"),
-        ("brain3mm.stl",       0.03, "lightgrey"),
+        ("brain3mm_wm.stl",    0.12, "#8B7355"),   # warm tan – WM interior, clearly distinct from GM
+        ("brain3mm_gm.stl",    0.07, "#C0C0C0"),   # silver – cortical GM surface
+        ("brain3mm_outer.stl", 0.03, "#D8D8D8"),   # very faint outer hull for overall brain shape
+        ("brain3mm.stl",       0.02, "#D8D8D8"),   # near-invisible full mesh for silhouette
     ]
 
     def __init__(self, plotter, brain_mesh_path=None, brain_meshes=None):
