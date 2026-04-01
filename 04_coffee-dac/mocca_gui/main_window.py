@@ -642,41 +642,48 @@ class MainWindow(QMainWindow):
         elevation = base_elevation + oscillation
         return azimuth, elevation
 
-    # ---------------- Brain opacity slider ------------------------
+    # ---------------- Brain opacity sliders ------------------------
 
     def build_brain_opacity_panel(self):
         panel = QWidget()
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(QLabel("Brain Opacity:"))
-
-        self.brain_opacity_label = QLabel("100%")
-        layout.addWidget(self.brain_opacity_label)
-
-        self.brain_opacity_slider = QSlider(Qt.Horizontal)
-        self.brain_opacity_slider.setRange(0, 100)
-        self.brain_opacity_slider.setValue(100)
-        self.brain_opacity_slider.setTickInterval(10)
-        self.brain_opacity_slider.setTickPosition(QSlider.TicksBelow)
-        self.brain_opacity_slider.valueChanged.connect(self.on_brain_opacity_changed)
-        layout.addWidget(self.brain_opacity_slider)
+        # GM slider
+        layout.addWidget(QLabel("GM Opacity:"))
+        self.gm_opacity_label = QLabel("35%")
+        layout.addWidget(self.gm_opacity_label)
+        self.gm_opacity_slider = QSlider(Qt.Horizontal)
+        self.gm_opacity_slider.setRange(0, 100)
+        self.gm_opacity_slider.setValue(35)
+        self.gm_opacity_slider.setTickInterval(10)
+        self.gm_opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.gm_opacity_slider.valueChanged.connect(self.on_gm_opacity_changed)
+        layout.addWidget(self.gm_opacity_slider)
 
         layout.addSpacing(20)
 
-        self.wm_checkbox = QCheckBox("Show WM")
-        self.wm_checkbox.setChecked(True)
-        self.wm_checkbox.stateChanged.connect(
-            lambda state: self.plotter.set_wm_visible(state == Qt.Checked)
-        )
-        layout.addWidget(self.wm_checkbox)
+        # WM slider
+        layout.addWidget(QLabel("WM Opacity:"))
+        self.wm_opacity_label = QLabel("10%")
+        layout.addWidget(self.wm_opacity_label)
+        self.wm_opacity_slider = QSlider(Qt.Horizontal)
+        self.wm_opacity_slider.setRange(0, 100)
+        self.wm_opacity_slider.setValue(10)
+        self.wm_opacity_slider.setTickInterval(10)
+        self.wm_opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.wm_opacity_slider.valueChanged.connect(self.on_wm_opacity_changed)
+        layout.addWidget(self.wm_opacity_slider)
 
         return panel
 
-    def on_brain_opacity_changed(self, value):
-        scale = value / 100.0
-        self.brain_opacity_label.setText(f"{value}%")
-        self.plotter.set_brain_opacity(scale)
+    def on_gm_opacity_changed(self, value):
+        self.gm_opacity_label.setText(f"{value}%")
+        self.plotter.set_layer_opacity('gm', value / 100.0)
+
+    def on_wm_opacity_changed(self, value):
+        self.wm_opacity_label.setText(f"{value}%")
+        self.plotter.set_layer_opacity('wm', value / 100.0)
 
     # ---------------- Dendrogram Plotting ------------------------
 

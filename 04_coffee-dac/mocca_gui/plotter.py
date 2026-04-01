@@ -132,12 +132,9 @@ class NetworkPlotter:
         """Add brain mesh layers to the plotter and store the returned actors."""
         self._live_brain_actors = []
         for mesh, base_opacity, color, smooth, kwargs, is_wm in self._brain_mesh_actors:
-            effective_opacity = base_opacity * self.brain_opacity_scale
-            if is_wm and not self.wm_visible:
-                effective_opacity = 0.0
             actor = self.plotter.add_mesh(
                 mesh,
-                opacity=effective_opacity,
+                opacity=base_opacity,
                 color=color,
                 smooth_shading=smooth,
                 lighting=True,
@@ -163,6 +160,18 @@ class NetworkPlotter:
                 actor.GetProperty().SetOpacity(
                     base_opacity * self.brain_opacity_scale if visible else 0.0
                 )
+        self.plotter.render()
+
+    def set_layer_opacity(self, tag, opacity):
+        """
+        Set opacity (0.0–1.0) for a named layer group.
+        tag : 'gm'  → all entries where is_wm is False (non-WM layers)
+              'wm'  → all entries where is_wm is True
+        """
+        opacity = max(0.0, min(1.0, opacity))
+        for actor, base_opacity, is_wm in self._live_brain_actors:
+            if (tag == 'wm') == is_wm:
+                actor.GetProperty().SetOpacity(opacity)
         self.plotter.render()
 
     def clear(self):
