@@ -311,7 +311,7 @@ class MainWindow(QMainWindow):
 
         if dialog.exec_() == QDialog.Accepted:
             idx = combo.currentData()
-            self.plotter.bundle_colors[(fcn, bundle)][:, BUNDLE_COL]= idx
+            self.plotter.bundle_colors[(fcn, bundle)] = idx
 
             rgba = color_list[idx]
             button_widget.setStyleSheet(
@@ -327,7 +327,7 @@ class MainWindow(QMainWindow):
         from mocca_gui.colormap import my_colormap
 
         # Remove custom bundle color
-        self.plotter.bundle_colors[(fcn, bundle_id)][:, BUNDLE_COL]= None
+        self.plotter.bundle_colors[(fcn, bundle_id)] = None
         print(f"Bundle {bundle_id} in FCN {fcn} reset to FCN color.")
 
         # Check for custom FCN color stored under (fcn, "All")
@@ -384,7 +384,7 @@ class MainWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             idx = combo.currentData()
 
-            self.plotter.bundle_colors[(fcn, 'All')][:, BUNDLE_COL]= idx
+            self.plotter.bundle_colors[(fcn, 'All')] = idx
 
             rgba = color_list[idx]
             button_widget.setStyleSheet(
@@ -458,7 +458,7 @@ class MainWindow(QMainWindow):
         key = (fcn, bundle)
         current = self.plotter.centroid_flags.get(key, False)
         new_state = not current
-        self.plotter.centroid_flags[key][:, BUNDLE_COL]= new_state
+        self.plotter.centroid_flags[key] = new_state
 
         if new_state:
             button_widget.setText("Centroid ✓")
@@ -651,9 +651,9 @@ class MainWindow(QMainWindow):
         num_fcns = int(np.max(edges_net[:, NETWORK_COL])) + 1
 
         def find_nth_largest_link(Z, n):
-            # Z[:, 2][:, BUNDLE_COL]contains the distances of the merges
+            # Z[:, 2] contains the distances of the merges
             distances = Z[:, 2]
-            sorted_distances = np.sort(distances)[::-1][:, BUNDLE_COL] # descending order
+            sorted_distances = np.sort(distances)[::-1]  # descending order
             if n > len(sorted_distances):
                 return None
             nth_distance = sorted_distances[n - 1]
@@ -668,9 +668,9 @@ class MainWindow(QMainWindow):
         # Map bundle → FCN
         bundle_to_fcn = {}
         for b in unique_bundles:
-            fcn_ids = edges_net[edges_net[:, BUNDLE_COL][:, BUNDLE_COL]== b, NETWORK_COL]
+            fcn_ids = edges_net[edges_net[:, BUNDLE_COL] == b, NETWORK_COL]
             fcn = int(fcn_ids[0]) if len(fcn_ids) > 0 else -1
-            bundle_to_fcn[int(b)][:, BUNDLE_COL]= fcn
+            bundle_to_fcn[int(b)] = fcn
 
         # Map FCNs → colors from my_colormap
         unique_fcns = sorted(set(bundle_to_fcn.values()))
@@ -683,7 +683,7 @@ class MainWindow(QMainWindow):
                 if hasattr(color_arr, "tolist")
                 else tuple(color_arr)
             )
-            fcn_colors[fcn][:, BUNDLE_COL]= color_tuple
+            fcn_colors[fcn] = color_tuple
 
         # Build labels
         labels = [
@@ -708,10 +708,10 @@ class MainWindow(QMainWindow):
                     if hasattr(color_arr, "tolist")
                     else tuple(color_arr)
                 )
-                bundle_to_color[b_int][:, BUNDLE_COL]= color_tuple
+                bundle_to_color[b_int] = color_tuple
             else:
                 # Default FCN color
-                bundle_to_color[b_int][:, BUNDLE_COL]= fcn_colors.get(fcn, (0.5, 0.5, 0.5, 1.0))
+                bundle_to_color[b_int] = fcn_colors.get(fcn, (0.5, 0.5, 0.5, 1.0))
 
         # Build fcn_to_color
         fcn_to_color = {}
@@ -730,7 +730,7 @@ class MainWindow(QMainWindow):
                 else tuple(color_arr)
             )
     
-            fcn_to_color[fcn][:, BUNDLE_COL]= color_tuple
+            fcn_to_color[fcn] = color_tuple
 
 
         return {
