@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter, QPushButton,
     QHBoxLayout, QLabel, QCheckBox, QSlider, QFileDialog, QMessageBox,
     QProgressDialog, QDialog, QVBoxLayout, QComboBox, QDialogButtonBox,
-    QColorDialog, QSpinBox
+    QColorDialog
 )
 from PyQt5.QtGui import QPixmap, QColor, QIcon
 from PyQt5.QtCore import Qt, QTimer
@@ -19,9 +19,6 @@ from mocca_gui.gif_exporter import GifExporter
 from mocca_gui.dendrogram_plotter import show_dendrogram
 from mocca_gui.plot_worker import PlotWorker
 from mocca_gui.data_loader import EdgeDataLoaderWorker
-
-from coffee_dac_pipeline import cache_exists
-from coffee_dac_pipeline_v2 import cache_exists_v2
 
 import pyvista as pv
 import math
@@ -55,7 +52,7 @@ class MainWindow(QMainWindow):
 
         # PyVista plotter
         self.plotter_widget = QtInteractor()
-        self.plotter = NetworkPlotter(self.plotter_widget.interactor, brain_mesh_path="brain3mm.stl")
+        self.plotter = NetworkPlotter(self.plotter_widget.interactor, brain_mesh_path="test.stl")
         splitter.addWidget(self.plotter_widget)
 
         # Tree manager
@@ -138,147 +135,14 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        has_v1 = cache_exists(path)
-        has_v2 = cache_exists_v2(path)
-
-        # ------------------------------------------------------------------ #
-        # Decide pipeline (v1 / v2) and whether to use a cached result.      #
-        # ------------------------------------------------------------------ #
-        pipeline  = 'v1'
-        use_cache = False
-        recut     = None
-
-        if has_v1 or has_v2:
-            # Build a message that reflects exactly what is available
-            cache_lines = []
-            if has_v1:
-                cache_lines.append("  • v1 (original dual-hierarchical clustering)")
-            if has_v2:
-                cache_lines.append("  • v2 (tstat-filtered spatial networks)")
-            cache_info = "\n".join(cache_lines)
-
-            from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QRadioButton, QDialogButtonBox, QButtonGroup
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Load options")
-            vlay = QVBoxLayout(dlg)
-            vlay.addWidget(QLabel(
-                f"Pre-processed cache(s) found:\n{cache_info}\n\n"
-                "Choose how to load:"
-            ))
-
-            btn_group = QButtonGroup(dlg)
-
-            # Radio options — only show what actually exists
-            radios = {}
-            if has_v2:
-                r = QRadioButton("Load v2 cache  (fast)")
-                r.setChecked(True)          # prefer v2 when available
-                vlay.addWidget(r)
-                btn_group.addButton(r)
-                radios['v2_cache'] = r
-
-            if has_v1:
-                r = QRadioButton("Load v1 cache  (fast)")
-                if not has_v2:
-                    r.setChecked(True)
-                vlay.addWidget(r)
-                btn_group.addButton(r)
-                radios['v1_cache'] = r
-
-            r = QRadioButton("Run v1 pipeline from scratch")
-            vlay.addWidget(r)
-            btn_group.addButton(r)
-            radios['v1_run'] = r
-
-            r = QRadioButton("Run v2 pipeline from scratch")
-            vlay.addWidget(r)
-            btn_group.addButton(r)
-            radios['v2_run'] = r
-
-            # Network count spinbox (only active for v2 cache)
-            net_row = QHBoxLayout()
-            net_label = QLabel("Networks (v2 cache re-cut):")
-            net_spin = QSpinBox()
-            net_spin.setRange(1, 99)
-            net_spin.setValue(5)
-            net_spin.setToolTip(
-                "Re-cut the hierarchical tree into this many networks on load.\n"
-                "Only applied when loading a v2 cache; free — no reprocessing needed."
-            )
-            net_row.addWidget(net_label)
-            net_row.addWidget(net_spin)
-            vlay.addLayout(net_row)
-
-            # Enable/disable spinbox based on radio selection
-            def _update_spin():
-                net_spin.setEnabled(
-                    radios.get('v2_cache') is not None and
-                    radios['v2_cache'].isChecked()
-                )
-            for r in btn_group.buttons():
-                r.toggled.connect(_update_spin)
-            _update_spin()
-
-            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            bb.accepted.connect(dlg.accept)
-            bb.rejected.connect(dlg.reject)
-            vlay.addWidget(bb)
-
-            if dlg.exec_() != QDialog.Accepted:
-                return
-
-            recut = None
-            if radios.get('v2_cache') and radios['v2_cache'].isChecked():
-                pipeline, use_cache = 'v2', True
-                recut = net_spin.value()
-            elif radios.get('v1_cache') and radios['v1_cache'].isChecked():
-                pipeline, use_cache = 'v1', True
-            elif radios.get('v2_run') and radios['v2_run'].isChecked():
-                pipeline, use_cache = 'v2', False
-            else:
-                pipeline, use_cache = 'v1', False
-
-        else:
-            # No cache at all — ask which pipeline to run
-            from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QRadioButton, QDialogButtonBox, QButtonGroup
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Choose pipeline")
-            vlay = QVBoxLayout(dlg)
-            vlay.addWidget(QLabel("No pre-processed cache found.\nChoose which pipeline to run:"))
-
-            btn_group = QButtonGroup(dlg)
-            r1 = QRadioButton("v1 – original dual-hierarchical clustering")
-            r1.setChecked(True)
-            vlay.addWidget(r1)
-            btn_group.addButton(r1)
-            r2 = QRadioButton("v2 – tstat-filtered spatial networks")
-            vlay.addWidget(r2)
-            btn_group.addButton(r2)
-
-            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-            bb.accepted.connect(dlg.accept)
-            bb.rejected.connect(dlg.reject)
-            vlay.addWidget(bb)
-
-            if dlg.exec_() != QDialog.Accepted:
-                return
-
-            pipeline  = 'v2' if r2.isChecked() else 'v1'
-            use_cache = False
-
-        label = (
-            f"Loading cached data (pipeline {pipeline})..."
-            if use_cache else
-            f"Running pipeline {pipeline} (this may take a while)..."
+        self.progress_dialog = QProgressDialog(
+            "Loading data...", "Cancel", 0, 100, self
         )
-        self.progress_dialog = QProgressDialog(label, "Cancel", 0, 100, self)
         self.progress_dialog.setWindowModality(Qt.WindowModal)
         self.progress_dialog.setValue(0)
 
-        self.loader_worker = EdgeDataLoaderWorker(
-            path, use_cache=use_cache, pipeline=pipeline,
-            recut=recut if pipeline == 'v2' and use_cache else None,
-        )
+        self.loader_worker = EdgeDataLoaderWorker(path)
+
         self.loader_worker.progress.connect(self.progress_dialog.setValue)
         self.loader_worker.finished.connect(self.on_data_loaded)
         self.progress_dialog.canceled.connect(self.loader_worker.terminate)
@@ -297,12 +161,13 @@ class MainWindow(QMainWindow):
         if self.edges_net is None:
             QMessageBox.warning(self, "No Data", "Load data first.")
             return
-        from coffee_dac_pipeline import NETWORK_COL
         selection = []
-        fcn_ids = sorted(set(self.edges_net[:, NETWORK_COL].astype(int)))
+        fcn_ids = sorted(set(self.edges_net[:,7].astype(int)))
         for f in fcn_ids:
             selection.append({"fcn": f, "bundle": "All"})
-        self._start_plot_worker(selection)
+        self.plotter.draw_selection(
+            self.edges_net, selection, self.endpoint_checkbox.isChecked()
+        )
 
     def clear_plot(self):
         self.plotter.clear()
@@ -313,11 +178,10 @@ class MainWindow(QMainWindow):
         if not selection:
             QMessageBox.information(self, "Nothing selected", "Select bundles or FCNs first.")
             return
-        self._start_plot_worker(selection)
 
-    def _start_plot_worker(self, selection):
         show_eps = self.endpoint_checkbox.isChecked()
 
+        # set up progress dialog
         self.progress_dialog = QProgressDialog(
             "Plotting...", "Cancel", 0, 100, self
         )
@@ -325,18 +189,19 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setMinimumDuration(0)
         self.progress_dialog.setValue(0)
 
-        # PlotWorker is a QObject + QTimer – all VTK calls stay on the main thread
-        self.plot_worker = PlotWorker(
-            self.plotter, self.edges_net, selection, show_eps
+        cancelled_flag = [False]
+
+        def cancel_plot():
+            cancelled_flag[0] = True
+
+        self.plotter.draw_selection(
+            self.edges_net,
+            selection,
+            endpoint_visible=show_eps,
+            stop_flag=lambda: cancelled_flag[0],
+            progress_callback=self.progress_dialog.setValue
         )
-        self.plot_worker.progress.connect(self.progress_dialog.setValue)
-        self.plot_worker.finished.connect(self._on_plot_finished)
-        self.progress_dialog.canceled.connect(self.plot_worker.cancel)
 
-        self.plot_worker.start()   # starts the QTimer
-        self.progress_dialog.show()
-
-    def _on_plot_finished(self):
         self.progress_dialog.close()
 
     def choose_color(self, fcn, bundle, button_widget):
@@ -700,22 +565,19 @@ class MainWindow(QMainWindow):
     def prepare_dendrogram_plot_data(self):
         import numpy as np
         from mocca_gui.colormap import my_colormap
-        from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
 
         edges_net = self.edges_net
         Z = self.linkage_matrix
 
         # get number of FCNs
-        num_fcns = int(np.max(edges_net[:, NETWORK_COL])) + 1
+        num_fcns = int(np.max(edges_net[:, 7])) + 1
 
         def find_nth_largest_link(Z, n):
             # Z[:, 2] contains the distances of the merges
             distances = Z[:, 2]
             sorted_distances = np.sort(distances)[::-1]  # descending order
-            if len(sorted_distances) == 0:
-                return 0.0
-            # Clamp n to the number of available distances
-            n = min(n, len(sorted_distances))
+            if n > len(sorted_distances):
+                return None
             nth_distance = sorted_distances[n - 1]
             return nth_distance
         
@@ -723,12 +585,12 @@ class MainWindow(QMainWindow):
         cut_distance = find_nth_largest_link(Z, 5)
 
         # Get unique bundles
-        unique_bundles = np.unique(edges_net[:, BUNDLE_COL])
+        unique_bundles = np.unique(edges_net[:, 6])
 
         # Map bundle → FCN
         bundle_to_fcn = {}
         for b in unique_bundles:
-            fcn_ids = edges_net[edges_net[:, BUNDLE_COL] == b, NETWORK_COL]
+            fcn_ids = edges_net[edges_net[:, 6] == b, 7]
             fcn = int(fcn_ids[0]) if len(fcn_ids) > 0 else -1
             bundle_to_fcn[int(b)] = fcn
 

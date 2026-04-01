@@ -1,0 +1,133 @@
+----
+GIT:
+----
+
+Ruined the repository with git development branch. Try to add things, not remove
+everything else! Though using git wasn't expected of you. This is good to know
+for future reference. Since git was a after-thought in this case, this is just a fyi.
+
+-------
+Python:
+-------
+
+Try to add a virtual environment, or at least a requirements.txt file to enable
+quick install of required packages:
+
+Virtual Environment:
+
+        python -m venv .venv
+
+Activate virtual environment
+
+        soruce .venv/bin/activate
+        
+Install python packages in the virtual environment
+
+        python -m pip install <package name>
+
+Install packages in requirements.txt
+
+        python -m pip install -r requirements.txt
+
+Deactiavte virtual environment
+
+        deactivate
+
+Required Packages:
+
+* pandas
+* PyQt5
+* pyvistaqt
+* nibabel
+* scipy
+* scikit-learn
+* tqdm
+* imageio
+
+-----
+BUGS:
+-----
+
+When plotting, and trying to interact with the window in Linux, the OS will
+think pyqt_launcher.py has stopped responding and will prompt if one wishes to
+kill the application or wait. And if clicked "wait", the prompt will pop up
+again in a couple of seconds. This keeps up until the rendering is actually
+done.
+
+Dendrogram doesn't seem to look correct.
+
+When plotting the dendrogram, the program is slow to respond and in Linux, the
+"is not responding" window pops up again.
+
+-----------------------------
+What I have done to the repo:
+-----------------------------
+
+* added virtual environment .venv for easy deployment
+* added requirements.txt to easily install all required python packages in one command
+* removed some clutter (unused files)
+* moved test data to a separate folder and .gitignored. This is really important. 
+* updated readme.md file to conform to typical repo readme files. Generally
+  pretty good written, introduction/requirements needed some additions in
+  details on how to get it running.
+* refactored the code (!). In the process changed/added some things:
+        - added back endpoint size 
+        - changed a bit how the fine-tuning is done
+        - fixed "waiting, not responding" bug
+        - removed "save all gifs" functionality, because its not necessary so didn't bother refactoring that bit.
+
+---------
+The Code:
+---------
+
+Generally everything seems to work fine (with the exception of dendrogram
+plotting). This is very commendable given the time and prior experience you've
+had. 
+
+The structure of the code however leaves a lot the be desired. A monolithic code
+(everything in one single file) may seem convenient at first, but quickly gets
+overwhelming as features grow. This is specially true in collaborative efforts
+where more than 1 developer works with the code.
+
+For a monolithic class, you have sub-divided and commented the code (sorted and
+organized related functions together in snippets) rather well, but that is just
+about as good of things I can say to the code structure. 
+
+It took me a whole hour to get through and understand the code (and not in
+detail). For a single file of ~4500lines of code, that tells me this code needs
+refactoring if anyone (including myself) would have a chance at
+maintaining/developing this in the future. 
+
+Note that I didn't expect perfectly structured code in the beginning, and
+understand that refactoring this project may be beyond the time you have left,
+and because I wish this work to be useful to myself, and hopefully other
+researchers in the future, I have taken the liberty of refactoring this code for
+you. Mind you this is not a trivial task, and it took almost 8 hours of full
+concentration programming time on my part to do this. For context this is more
+programming than I had to do the past month in total. The reason I say this is
+not that I mind it (rather I found it enjoyable and appreciate the time you've
+spent implementing all these features), but rather for you to know the hidden
+costs of "not doing something properly" in the beginning. I am fully aware that
+it is difficult to "waste" time on refactoring/restructuring the code instead of
+implementing something new. But keep in mind that messy code compound on itself,
+and someone, sooner or later, have to pay for it. Messy code comes to a point
+where it simply is easier to re-write everything from scratch. This wasn't it,
+but close. I wish you to look through the refactored code, and understand it's
+structure. Three things to take note that might seem downsides at first:
+
+1. Overall, the number of lines of code has increased compared to before. This
+is unavoidable with refactoring. 
+
+2. Logic pathways is more indirect and more often than not spans more than 1
+file/class (oftentimes many more). This is also unavoidable.
+
+3. You might not agree with the exact logic in the refactoring, but that
+secondary. As long as one can easily understand (not necessarily agree with) the
+logic behind the refactoring and use it to locate relevant code is the important
+part. 
+
+With that I wish you (if you have time to spare that is) to locate the
+code relevant to dendrogram plotting, and fix it (I have changed this a bit, but
+not actually fixed it completely).
+
+

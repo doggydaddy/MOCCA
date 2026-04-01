@@ -6,8 +6,6 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
-from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
-
 class TreeManager:
     def __init__(self, main_window):
         self.main_window = main_window
@@ -25,7 +23,7 @@ class TreeManager:
 
     def populate(self, edges_net):
         self.tree.clear()
-        fcn_ids = sorted(set(edges_net[:, NETWORK_COL].astype(int)))
+        fcn_ids = sorted(set(edges_net[:, 7].astype(int)))
 
         for fcn in fcn_ids:
             fcn_item = QTreeWidgetItem([f"FCN {fcn}", ""])  # Right column will be filled later
@@ -103,7 +101,7 @@ class TreeManager:
                 color_btn.setStyleSheet("background-color: none; border: 1px solid #ccc;")
 
             # Add bundle items
-            bundle_ids = sorted(set(edges_net[edges_net[:, NETWORK_COL] == fcn][:, BUNDLE_COL].astype(int)))
+            bundle_ids = sorted(set(edges_net[edges_net[:, 7] == fcn][:, 6].astype(int)))
             for bundle in bundle_ids:
                 bundle_item = QTreeWidgetItem([f"Bundle {bundle}"])
                 bundle_item.setData(0, Qt.UserRole, {

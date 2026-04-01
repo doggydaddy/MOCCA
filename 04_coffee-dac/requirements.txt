@@ -1,0 +1,11 @@
+matplotlib
+numpy
+pyvista 
+pandas
+PyQt5
+pyvistaqt
+nibabel
+scipy
+scikit-learn
+tqdm
+imageio
