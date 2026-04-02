@@ -483,18 +483,11 @@ class MainWindow(QMainWindow):
         for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL] == fcn][:,BUNDLE_COL]):
             self.plotter.centroid_flags[(fcn, int(b))] = new_state
 
-        # Optionally update UI text for all bundle buttons
-        for i in range(self.tree_manager.tree.topLevelItemCount()):
-            fcn_item = self.tree_manager.tree.topLevelItem(i)
-            if fcn_item.text(0) == f"FCN {fcn}":
-                for j in range(fcn_item.childCount()):
-                    child = fcn_item.child(j)
-                    if child.text(0).startswith("Bundle "):
-                        btn_widget = self.tree_manager.tree.itemWidget(child, 1)
-                        if btn_widget:
-                            centroid_btn = btn_widget.layout().itemAt(1).widget()
-                            if centroid_btn:
-                                centroid_btn.setText("Centroid ✓" if new_state else "Centroid")
+        # Update centroid button labels via the stored button references
+        for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL] == fcn][:,BUNDLE_COL]):
+            btn = self.tree_manager.bundle_centroid_buttons.get((fcn, int(b)))
+            if btn:
+                btn.setText("Centroid ✓" if new_state else "Centroid")
 
         self.plot_selected()
 
@@ -514,17 +507,9 @@ class MainWindow(QMainWindow):
             for b in np.unique(self.edges_net[self.edges_net[:,NETWORK_COL]==f][:,BUNDLE_COL]):
                 self.plotter.centroid_flags[(int(f), int(b))] = new_state
 
-        # Update centroid buttons in the tree view
-        for i in range(self.tree_manager.tree.topLevelItemCount()):
-            fcn_item = self.tree_manager.tree.topLevelItem(i)
-            for j in range(fcn_item.childCount()):
-                child = fcn_item.child(j)
-                if child.text(0).startswith("Bundle "):
-                    btn_widget = self.tree_manager.tree.itemWidget(child, 1)
-                    if btn_widget:
-                        centroid_btn = btn_widget.layout().itemAt(1).widget()
-                        if centroid_btn:
-                            centroid_btn.setText("Centroid ✓" if new_state else "Centroid")
+        # Update centroid button labels via the stored button references
+        for (f, b), btn in self.tree_manager.bundle_centroid_buttons.items():
+            btn.setText("Centroid ✓" if new_state else "Centroid")
 
         self.plot_selected()
     

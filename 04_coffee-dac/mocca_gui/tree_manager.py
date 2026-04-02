@@ -20,10 +20,12 @@ class TreeManager:
         self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
         layout.addWidget(self.tree)
 
-        self.bundle_color_buttons = {}  # Store color buttons for bundles
+        self.bundle_color_buttons = {}    # (fcn, bundle) -> color QPushButton
+        self.bundle_centroid_buttons = {}  # (fcn, bundle) -> centroid QPushButton
 
     def populate(self, edges_net):
         self.tree.clear()
+        self.bundle_centroid_buttons = {}  # reset on each populate
         fcn_ids = sorted(set(edges_net[:, NETWORK_COL].astype(int)))
 
         for fcn in fcn_ids:
@@ -157,6 +159,7 @@ class TreeManager:
                         self.main_window.toggle_centroid(f, b, btn)
                 )
                 bundle_buttons_layout.addWidget(centroid_btn)
+                self.bundle_centroid_buttons[(fcn, bundle)] = centroid_btn
 
                 # Fine-tune button
                 fine_tune_btn = QPushButton("Fine Tune")
