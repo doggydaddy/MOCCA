@@ -189,9 +189,10 @@ If interrupted, simply run the same command again - it will automatically resume
 
 ## Version Information
 
-**Current Version:** v3.2 (March 29, 2026)
+**Current Version:** v4.0 (April 5, 2026)
 
 Major improvements:
+- ✅ **Welch's t-statistic replaces raw mean difference** — fixes massively inflated false positive rates (v4.0, April 5, 2026)
 - ✅ **GPU kernel optimization: ~150–270x faster per part** (v3.2, March 29, 2026)
 - ✅ Fixed GPU memory calculation causing NaN t-statistics (v3.1, March 27, 2026)
 - ✅ Fixed critical p-value calculation bug (v3.0)
