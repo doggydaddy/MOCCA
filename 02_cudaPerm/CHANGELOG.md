@@ -63,6 +63,22 @@ with a group difference that is **large relative to noise** achieve significance
   in the CUDA kernel previously): proper `>=` comparison, skip observed
   permutation in counting, correct `(count+1)/(nPerm+1)` formula
 
+### Bug Fix: One-Tailed Test Now Tests in Both Directions
+
+**Problem:**
+The one-tailed test only checked `tstat >= t_obs`, which only detects effects
+where Group A > Group B (positive t_obs). When Group B > Group A (negative
+t_obs), almost every permutation t-stat would exceed the negative observed
+value, producing p-values near 1.0 and making those effects invisible.
+
+**Fix:**
+The one-tailed test now tests in the direction of the observed effect:
+- `t_obs >= 0`: count permutations where `tstat >= t_obs` (upper tail)
+- `t_obs < 0`:  count permutations where `tstat <= t_obs` (lower tail)
+
+This correctly detects effects in both directions while remaining one-tailed
+(more powerful than two-tailed when direction is consistent).
+
 **Files Modified:**
 - `permutationTest_cuda.cu`: CUDA kernel — both observed t_obs and permutation
   loop now compute Welch's t-statistic
@@ -75,6 +91,7 @@ with a group difference that is **large relative to noise** achieve significance
 - ✅ Minimum p-value = 1/(nPerm+1) — correct
 - ✅ Smooth p-value distribution with no pile-ups
 - ✅ Elevated significance rates match injected signal regions
+- ✅ One-tailed test: no p-values piling up near 1.0 (both directions work)
 
 ---
 

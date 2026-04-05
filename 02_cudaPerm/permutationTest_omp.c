@@ -380,8 +380,15 @@ float t_permute(float* input, int idx, int* onehot,
             }
             else
             {
-                if (tstat >= t_obs)
-                    p_val++;
+                // One-tailed: test in the direction of the observed effect
+                if (t_obs >= 0.f)
+                {
+                    if (tstat >= t_obs) p_val++;
+                }
+                else
+                {
+                    if (tstat <= t_obs) p_val++;
+                }
             }
         }
     }

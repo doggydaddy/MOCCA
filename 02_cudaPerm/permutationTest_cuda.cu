@@ -872,7 +872,7 @@ void CUDA_perm(float *input, int* onehot,
         float se     = sqrtf(a_var / fmaxf(nA, 1.f) + b_var / fmaxf(nB, 1.f));
         tstat = (se > 1e-12f) ? (a_mean - b_mean) / se : 0.f;
 
-        // Count if permuted test statistic is more extreme
+        // Count if permuted test statistic is as or more extreme
         if (two_tailed == 1) 
         {
             if (fabsf(tstat) >= fabsf(t_obs)) 
@@ -882,9 +882,16 @@ void CUDA_perm(float *input, int* onehot,
         }
         else 
         {
-            if (tstat >= t_obs) 
+            // One-tailed: test in the direction of the observed effect
+            //   t_obs >= 0  →  count permutations with tstat >= t_obs  (upper tail)
+            //   t_obs <  0  →  count permutations with tstat <= t_obs  (lower tail)
+            if (t_obs >= 0.f)
             {
-                local_pval++;
+                if (tstat >= t_obs) local_pval++;
+            }
+            else
+            {
+                if (tstat <= t_obs) local_pval++;
             }
         }
     }
