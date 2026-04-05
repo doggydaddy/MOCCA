@@ -12,7 +12,8 @@
 #       -o <output_file>    \
 #       [-s <session_name>] \
 #       [--two-tailed]      \
-#       [-b]
+#       [-b]                \
+#       [--fwer]
 #
 #   -i  path to subject filelist (one .ccmat path per line)
 #   -p  path to permutations file (one permutation per line)
@@ -20,14 +21,16 @@
 #   -s  tmux session name (default: permTest)
 #   --two-tailed  enable two-tailed test
 #   -b  write output in binary format instead of text
+#   --fwer  enable FWER max-statistic correction (two-pass)
 # ============================================================
 
-BINARY=/mnt/islay/MOCCA/02_cudaPerm/build/permutationTest_cuda
+BINARY=/mnt/islay/MOCCA/02_cudaPerm/build/permutationTest_cuda_fwer
 
 # ---- defaults ------------------------------------------------
 SESSION="permTest"
 TWO_TAILED_FLAG=""
 BINARY_FLAG=""
+FWER_FLAG=""
 
 # ---- argument parsing ----------------------------------------
 while [[ $# -gt 0 ]]; do
@@ -38,13 +41,14 @@ while [[ $# -gt 0 ]]; do
         -s) SESSION="$2";    shift 2 ;;
         --two-tailed) TWO_TAILED_FLAG="--two-tailed"; shift ;;
         -b) BINARY_FLAG="-b"; shift ;;
+        --fwer) FWER_FLAG="--fwer"; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 # ---- validate required args ----------------------------------
 if [[ -z "$FILELIST" || -z "$PERMFILE" || -z "$OUTFILE" ]]; then
-    echo "Usage: $0 -i <filelist> -p <permutations> -o <output_file> [-s session] [--two-tailed] [-b]"
+    echo "Usage: $0 -i <filelist> -p <permutations> -o <output_file> [-s session] [--two-tailed] [-b] [--fwer]"
     exit 1
 fi
 
@@ -63,18 +67,19 @@ LOGFILE="${OUTDIR}/permutationTest_run_${TIMESTAMP}.log"
 CMD="${BINARY} ${FILELIST} ${PERMFILE} ${OUTFILE}"
 [[ -n "$TWO_TAILED_FLAG" ]] && CMD="${CMD} ${TWO_TAILED_FLAG}"
 [[ -n "$BINARY_FLAG"     ]] && CMD="${CMD} ${BINARY_FLAG}"
+[[ -n "$FWER_FLAG"       ]] && CMD="${CMD} ${FWER_FLAG}"
 
 # ---- write a wrapper script to avoid tmux quoting issues ----
 WRAPPER=$(mktemp /tmp/run_permTest_XXXXXX.sh)
 cat > "${WRAPPER}" << WEOF
 #!/bin/bash
 echo '========================================================'
-echo '  permutationTest_cuda'
+echo '  permutationTest_cuda_fwer'
 echo "  Started : \$(date)"
 echo '  Filelist: ${FILELIST}'
 echo '  Perms   : ${PERMFILE}'
 echo '  Output  : ${OUTFILE}'
-echo '  Flags   : ${TWO_TAILED_FLAG} ${BINARY_FLAG}'
+echo '  Flags   : ${TWO_TAILED_FLAG} ${BINARY_FLAG} ${FWER_FLAG}'
 echo '  Log     : ${LOGFILE}'
 echo '========================================================'
 ${CMD}
@@ -91,6 +96,7 @@ echo "  Perms   : ${PERMFILE}"
 echo "  Output  : ${OUTFILE}"
 [[ -n "$TWO_TAILED_FLAG" ]] && echo "  Test    : two-tailed"
 [[ -n "$BINARY_FLAG"     ]] && echo "  Format  : binary (-b)"
+[[ -n "$FWER_FLAG"       ]] && echo "  FWER    : enabled"
 echo "  Log     : ${LOGFILE}"
 
 tmux new-session -d -s "${SESSION}" \
