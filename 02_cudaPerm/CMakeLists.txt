@@ -20,7 +20,12 @@ add_executable(permutationTest_cuda permutationTest_cuda.cu)
 target_compile_options(permutationTest_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
 target_link_libraries(permutationTest_cuda PRIVATE gomp)
 
-add_executable(permutationTest_cuda_fwer permutationTest_cuda_fwer.cu)
+add_executable(permutationTest_cuda_fwer
+    permutationTest_cuda_fwer.cu
+    perm_kernels.cu
+    ccmat_io.c
+    results_io.c)
+target_include_directories(permutationTest_cuda_fwer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(permutationTest_cuda_fwer PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
 target_link_libraries(permutationTest_cuda_fwer PRIVATE gomp)
 
