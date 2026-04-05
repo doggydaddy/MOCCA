@@ -4,6 +4,41 @@ All notable changes to the CUDA permutation test program are documented in this 
 
 ---
 
+## [v4.1] - April 5, 2026 — `permutationTest_cuda_fwer.cu`
+
+New file: verbatim copy of v4.0 with FWER max-statistic two-pass mode added.
+The original `permutationTest_cuda.cu` is **unchanged**.
+
+### Added: `--fwer` flag (FWER max-statistic permutation testing)
+
+Enables family-wise error rate correction via the Westfall-Young max-statistic
+method. Two-pass streaming algorithm:
+
+- **Pass 1**: streams all connection chunks; for each permutation accumulates the
+  global max |t| across all connections using `atomicMaxFloat` (IEEE-754
+  float→int reinterpretation trick). Produces a `float[nr_perm]` null
+  distribution of global max |t| values.
+- **Pass 2**: re-streams all chunks; computes each connection's FWER p-value as
+  `count(max_t[perm] >= |t_obs|) / nr_perm`.
+
+New kernels:
+- `CUDA_perm_fwer_pass1` — builds global max-|t| per permutation
+- `CUDA_perm_fwer_pass2` — computes FWER p-values from the null distribution
+- `atomicMaxFloat` device helper (CUDA lacks native float atomicMax)
+
+Both single-chunk (fits in GPU) and multi-chunk streaming paths support `--fwer`.
+Null distribution statistics (min/mean/max of max |t|) are printed after Pass 1.
+
+**Runtime**: approximately 2× wall-clock vs. standard mode (two full passes).
+
+**Notes**:
+- FWER null is always built from |t| regardless of `--two-tailed` (max-statistic
+  is inherently absolute-value based)
+- No resume/partial-output in FWER mode — both passes must complete
+- Output format identical to standard mode
+
+---
+
 ## [v4.0] - April 5, 2026
 
 ### Critical Fix: Replaced Mean-Difference with Welch's T-Statistic
