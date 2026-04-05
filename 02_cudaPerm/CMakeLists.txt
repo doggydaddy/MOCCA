@@ -21,4 +21,4 @@ target_compile_options(permutationTest_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-
 target_link_libraries(permutationTest_cuda PRIVATE gomp)
 
 add_executable(permutationTest_omp permutationTest_omp.c)
-target_link_libraries(permutationTest_omp PRIVATE gomp)
+target_link_libraries(permutationTest_omp PRIVATE gomp m)

@@ -333,59 +333,59 @@ float t_permute(float* input, int idx, int* onehot,
                 int two_tailed)
 {
     float t_obs;
-    float p_val;
-
-    float a_mean = 0.;
-    float b_mean = 0.;
-    float nA = 0;
-    float nB = 0;
-    float tstat = 0.0;
+    float p_val = 0.;
 
     for (int i=0; i<nr_perm; ++i) 
     {
-        // t-stat
-        a_mean = 0.;
-        b_mean = 0.;
-        nA = 0;
-        nB = 0;
-        tstat = 0;
+        // Welch's t-stat: t = (mean_A - mean_B) / sqrt(var_A/nA + var_B/nB)
+        float a_sum = 0.f, b_sum = 0.f;
+        float a_sq  = 0.f, b_sq  = 0.f;
+        float nA = 0, nB = 0;
+        float tstat = 0.f;
+
         for (int j=0; j<nr_sub; ++j)
         {
-            if (onehot[(i*nr_sub)+j] == 0) // i-th row in perm
+            float val = input[(idx*nr_sub)+j];
+            if (onehot[(i*nr_sub)+j] == 0)
             {
-                b_mean += input[(idx*nr_sub)+j];
+                b_sum += val;
+                b_sq  += val * val;
                 nB++;
             } 
             else 
             {
-                a_mean += input[(idx*nr_sub)+j]; // n-th row in subject data
+                a_sum += val;
+                a_sq  += val * val;
                 nA++;
             }
         }
-        a_mean /= nA;
-        b_mean /= nB;
-        if ( two_tailed == 1) 
-        {
-            tstat = fabs(a_mean - b_mean);
-        }
-        else
-        {
-            tstat = a_mean - b_mean;
-        }
-        // /t-stat
+        float a_mean = (nA > 0) ? a_sum / nA : 0.f;
+        float b_mean = (nB > 0) ? b_sum / nB : 0.f;
+        float a_var  = (nA > 1) ? (a_sq - a_sum * a_sum / nA) / (nA - 1.f) : 0.f;
+        float b_var  = (nB > 1) ? (b_sq - b_sum * b_sum / nB) / (nB - 1.f) : 0.f;
+        float se     = sqrtf(a_var / fmaxf(nA, 1.f) + b_var / fmaxf(nB, 1.f));
+        tstat = (se > 1e-12f) ? (a_mean - b_mean) / se : 0.f;
 
         if (i == 0) // first permutation, t_obs is tstat
         {
             t_obs = tstat;
         }
 
-        if (tstat > t_obs) 
+        if (i > 0)  // only count permutations, not the observed
         {
-            p_val++;
+            if (two_tailed == 1) 
+            {
+                if (fabsf(tstat) >= fabsf(t_obs))
+                    p_val++;
+            }
+            else
+            {
+                if (tstat >= t_obs)
+                    p_val++;
+            }
         }
-
     }
-    p_val /= (float)nr_perm;
+    p_val = (p_val + 1.0f) / (float)(nr_perm + 1);
     return p_val;
 }
 

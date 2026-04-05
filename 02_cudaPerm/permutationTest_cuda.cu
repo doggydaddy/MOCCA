@@ -804,29 +804,35 @@ void CUDA_perm(float *input, int* onehot,
     float local_pval = 0.;
 
     // First permutation is computed by first thread to get observed t-statistic
+    // Uses Welch's t-statistic: t = (mean_A - mean_B) / sqrt(var_A/nA + var_B/nB)
     if (tid == 0) 
     {
-        float a_mean = 0.;
-        float b_mean = 0.;
-        float nA = 0;
-        float nB = 0;
+        float a_sum = 0.f, b_sum = 0.f;
+        float a_sq  = 0.f, b_sq  = 0.f;
+        float nA = 0, nB = 0;
         
         for (int j=0; j<nr_sub; ++j)
         {
+            float val = input[(n*nr_sub)+j];
             if (onehot[j] == 0)
             {
-                b_mean += input[(n*nr_sub)+j];
+                b_sum += val;
+                b_sq  += val * val;
                 nB++;
             } 
             else 
             {
-                a_mean += input[(n*nr_sub)+j];
+                a_sum += val;
+                a_sq  += val * val;
                 nA++;
             }
         }
-        if (nA > 0) a_mean /= nA;
-        if (nB > 0) b_mean /= nB;
-        t_obs = a_mean - b_mean;
+        float a_mean = (nA > 0) ? a_sum / nA : 0.f;
+        float b_mean = (nB > 0) ? b_sum / nB : 0.f;
+        float a_var  = (nA > 1) ? (a_sq - a_sum * a_sum / nA) / (nA - 1.f) : 0.f;
+        float b_var  = (nB > 1) ? (b_sq - b_sum * b_sum / nB) / (nB - 1.f) : 0.f;
+        float se     = sqrtf(a_var / fmaxf(nA, 1.f) + b_var / fmaxf(nB, 1.f));
+        t_obs = (se > 1e-12f) ? (a_mean - b_mean) / se : 0.f;
     }
     
     // Broadcast t_obs to all threads in the block
@@ -835,30 +841,36 @@ void CUDA_perm(float *input, int* onehot,
     t_obs = shared_pval[0];
 
     // Each thread processes a subset of permutations (starting from perm 1, not 0)
+    // Uses Welch's t-statistic: t = (mean_A - mean_B) / sqrt(var_A/nA + var_B/nB)
     for (int i = 1 + tid; i < nr_perm; i += block_size) 
     {
-        float a_mean = 0.;
-        float b_mean = 0.;
-        float nA = 0;
-        float nB = 0;
-        float tstat = 0.0;
+        float a_sum = 0.f, b_sum = 0.f;
+        float a_sq  = 0.f, b_sq  = 0.f;
+        float nA = 0, nB = 0;
+        float tstat = 0.f;
         
         for (int j=0; j<nr_sub; ++j)
         {
+            float val = input[(n*nr_sub)+j];
             if (onehot[(i*nr_sub)+j] == 0)
             {
-                b_mean += input[(n*nr_sub)+j];
+                b_sum += val;
+                b_sq  += val * val;
                 nB++;
             } 
             else 
             {
-                a_mean += input[(n*nr_sub)+j];
+                a_sum += val;
+                a_sq  += val * val;
                 nA++;
             }
         }
-        if (nA > 0) a_mean /= nA;
-        if (nB > 0) b_mean /= nB;
-        tstat = a_mean - b_mean;
+        float a_mean = (nA > 0) ? a_sum / nA : 0.f;
+        float b_mean = (nB > 0) ? b_sum / nB : 0.f;
+        float a_var  = (nA > 1) ? (a_sq - a_sum * a_sum / nA) / (nA - 1.f) : 0.f;
+        float b_var  = (nB > 1) ? (b_sq - b_sum * b_sum / nB) / (nB - 1.f) : 0.f;
+        float se     = sqrtf(a_var / fmaxf(nA, 1.f) + b_var / fmaxf(nB, 1.f));
+        tstat = (se > 1e-12f) ? (a_mean - b_mean) / se : 0.f;
 
         // Count if permuted test statistic is more extreme
         if (two_tailed == 1) 

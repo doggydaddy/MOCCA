@@ -4,6 +4,80 @@ All notable changes to the CUDA permutation test program are documented in this 
 
 ---
 
+## [v4.0] - April 5, 2026
+
+### Critical Fix: Replaced Mean-Difference with Welch's T-Statistic
+
+**⚠️ CRITICAL:** This change affects all results. Previous analyses used an
+unnormalized test statistic that does not account for within-group variance,
+producing severely inflated significance (millions of edges surviving even at
+p < 0.00001 with 100k permutations). **Rerun all analyses.**
+
+**Problem:**
+The permutation test statistic was a simple difference of group means:
+```cuda
+// BEFORE — raw mean difference (not variance-normalized)
+t_obs = a_mean - b_mean;
+```
+
+Without dividing by standard error, the test does not account for within-group
+variability. For connectivity values (correlations in [-1, 1]), group mean
+differences are tiny numbers. Random permutations also produce tiny mean
+differences, and the observed difference — even if small — can easily appear
+"extreme" relative to the permutation null simply because the test lacks
+resolution. This led to **massively inflated false positive rates** (6–7 million
+edges surviving at p < 0.00001 with the 3 mm subsampled dataset and 100k
+permutations).
+
+**Solution: Welch's t-statistic**
+```cuda
+// AFTER — variance-normalized (Welch's t-statistic)
+float a_var = (a_sq - a_sum * a_sum / nA) / (nA - 1.f);
+float b_var = (b_sq - b_sum * b_sum / nB) / (nB - 1.f);
+float se    = sqrtf(a_var / nA + b_var / nB);
+tstat = (se > 1e-12f) ? (a_mean - b_mean) / se : 0.f;
+```
+
+Welch's t-statistic is `(mean_A - mean_B) / sqrt(var_A/nA + var_B/nB)` and is
+the standard test statistic for two-sample permutation tests. It properly
+penalises connections with high within-group scatter, ensuring only connections
+with a group difference that is **large relative to noise** achieve significance.
+
+**Why the old statistic was wrong:**
+- Mean-difference is sensitive to the *absolute* scale of values, not the
+  signal-to-noise ratio
+- Connections where both groups have near-identical means but very low variance
+  appeared "significant" because even tiny random fluctuations exceeded the
+  (equally tiny) permutation null
+- The permutation null distribution was far too narrow, making almost any real
+  difference look extreme
+
+**Performance Impact:**
+- Negligible (~0–5% wall-clock increase). The extra arithmetic (one multiply
+  and one `sqrtf` per permutation) operates on data already in registers and
+  hides behind memory latency. No additional global memory traffic.
+
+**Additional Fix: OMP version**
+- `permutationTest_omp.c` updated with the same Welch's t-statistic
+- Also fixed the old p-value bugs (same issues from v3.0 that were only fixed
+  in the CUDA kernel previously): proper `>=` comparison, skip observed
+  permutation in counting, correct `(count+1)/(nPerm+1)` formula
+
+**Files Modified:**
+- `permutationTest_cuda.cu`: CUDA kernel — both observed t_obs and permutation
+  loop now compute Welch's t-statistic
+- `permutationTest_omp.c`: `t_permute()` function rewritten with Welch's
+  t-statistic and v3.0 p-value fixes
+- `CMakeLists.txt`: Added `-lm` (math library) link for OMP target
+
+**Validated on simulated data (20 subjects, 5000 voxels, 5001 permutations):**
+- ✅ No exact zero p-values
+- ✅ Minimum p-value = 1/(nPerm+1) — correct
+- ✅ Smooth p-value distribution with no pile-ups
+- ✅ Elevated significance rates match injected signal regions
+
+---
+
 ## [v3.2] - March 29, 2026
 
 ### Performance: Critical GPU Kernel Optimization (~150-270x Speedup)
@@ -380,6 +454,7 @@ void parseFileListNtoM(..., size_t N, size_t M, ...)
 
 | Version | Date | Major Changes |
 |---------|------|---------------|
+| v4.0 | April 5, 2026 | Critical fix: Welch's t-statistic replaces raw mean difference; OMP parity fixes |
 | v3.2 | March 29, 2026 | Performance: GPU kernel optimization, ~150-270x speedup per part |
 | v3.1 | March 27, 2026 | Bug fix: GPU memory calculation causing NaN t-statistics |
 | v3.0 | March 7, 2026 | Bug fix: corrected p-value calculation, added two-tailed test, t-statistic output, incremental saving |
