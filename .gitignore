@@ -32,3 +32,6 @@ templates/
 
 # STL meshes are kept (04_coffee-dac)
 !*.stl
+
+# output gifs
+*.gif

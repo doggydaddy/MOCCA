@@ -526,7 +526,8 @@ class MainWindow(QMainWindow):
                 filename=filename,
                 elevation=self.elevation_slider.value(),
                 azimuth=self.azimuth_slider.value(),
-                plotter=self.plotter
+                plotter=self.plotter,
+                endpoint_visible=self.endpoint_checkbox.isChecked(),
             )
             QMessageBox.information(self, "Done", f"GIF saved:\n{filename}")
 
