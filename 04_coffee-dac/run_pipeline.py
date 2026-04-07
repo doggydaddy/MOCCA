@@ -30,7 +30,8 @@ import sys
 # are available without requiring the caller to activate the venv manually.
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_VENV_PYTHON = os.path.join(SCRIPT_DIR, '.venv', 'bin', 'python3')
+_MOCCA_ROOT = os.path.dirname(SCRIPT_DIR)
+_VENV_PYTHON = os.path.join(_MOCCA_ROOT, '.venv', 'bin', 'python3')
 
 if os.path.isfile(_VENV_PYTHON) and os.path.abspath(sys.executable) != os.path.abspath(_VENV_PYTHON):
     os.execv(_VENV_PYTHON, [_VENV_PYTHON] + sys.argv)

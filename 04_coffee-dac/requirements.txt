@@ -1,6 +1,18 @@
+# Dependencies have been consolidated into the top-level requirements.txt.
+# Use the shared venv at MOCCA/.venv:
+#
+#   python3 -m venv /mnt/islay/MOCCA/.venv
+#   /mnt/islay/MOCCA/.venv/bin/pip install -r /mnt/islay/MOCCA/requirements.txt
+#
+# Then run scripts with:
+#   /mnt/islay/MOCCA/.venv/bin/python <script>.py
+# or simply activate:
+#   source /mnt/islay/MOCCA/.venv/bin/activate
+#
+# Original direct dependencies (now tracked in ../requirements.txt):
 matplotlib
 numpy
-pyvista 
+pyvista
 pandas
 PyQt5
 pyvistaqt

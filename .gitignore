@@ -35,3 +35,9 @@ templates/
 
 # output gifs
 *.gif
+
+# Local Codex temp marker
+.codex
+
+# Root-level environment snapshot (project uses 04_coffee-dac/requirements.txt)
+/requirements.txt

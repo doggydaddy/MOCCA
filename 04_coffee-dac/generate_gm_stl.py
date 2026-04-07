@@ -24,7 +24,7 @@ Strategy
 Usage
 -----
     cd /mnt/islay/MOCCA/04_coffee-dac
-    .venv/bin/python generate_gm_stl.py
+    ../.venv/bin/python generate_gm_stl.py
 """
 
 import os
