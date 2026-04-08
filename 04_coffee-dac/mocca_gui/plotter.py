@@ -33,9 +33,53 @@ def add_endpoints(plotter, edge, color, size_scale=1.0, opacity=0.2):
     actor = plotter.add_mesh(glyphs, color=color[:3], opacity=opacity)
     return actor
 
+def _align_bundle_endpoint_orientation(edges_bundle):
+    """
+    Align edge orientation inside one bundle before centroid aggregation.
+
+    Some bundles contain both A->B and B->A rows. If we average raw start/end
+    columns directly, centroids can collapse toward the midpoint and produce an
+    unnaturally short centroid line. This routine flips per-edge orientation
+    (when needed) to keep starts/ends consistent across the bundle.
+    """
+    start_points = edges_bundle[:, 0:3].astype(np.float64, copy=True)
+    end_points = edges_bundle[:, 3:6].astype(np.float64, copy=True)
+
+    n_edges = len(edges_bundle)
+    if n_edges <= 1:
+        return start_points, end_points
+
+    # Seed with the longest edge for a stable initial direction.
+    lengths = np.linalg.norm(end_points - start_points, axis=1)
+    seed_idx = int(np.argmax(lengths))
+    seed_start = start_points[seed_idx].copy()
+    seed_end = end_points[seed_idx].copy()
+
+    assigned = 1
+    # Process long edges first to stabilize the running centroids.
+    for idx in np.argsort(-lengths):
+        if idx == seed_idx:
+            continue
+
+        a = start_points[idx]
+        b = end_points[idx]
+
+        same_cost = np.linalg.norm(a - seed_start) + np.linalg.norm(b - seed_end)
+        swap_cost = np.linalg.norm(b - seed_start) + np.linalg.norm(a - seed_end)
+
+        if swap_cost < same_cost:
+            start_points[idx], end_points[idx] = b.copy(), a.copy()
+            a = start_points[idx]
+            b = end_points[idx]
+
+        seed_start = (seed_start * assigned + a) / (assigned + 1)
+        seed_end = (seed_end * assigned + b) / (assigned + 1)
+        assigned += 1
+
+    return start_points, end_points
+
 def generate_centroid_edge(edges_bundle, plotter=None, color=None):
-    start_points = edges_bundle[:, 0:3]
-    end_points = edges_bundle[:, 3:6]
+    start_points, end_points = _align_bundle_endpoint_orientation(edges_bundle)
 
     centroid_start = np.mean(start_points, axis=0)
     centroid_end = np.mean(end_points, axis=0)
@@ -298,5 +342,4 @@ class NetworkPlotter:
 
         self.plotter.reset_camera()
         self.plotter.render()
-
 
