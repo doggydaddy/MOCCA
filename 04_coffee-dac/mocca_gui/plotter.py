@@ -8,6 +8,13 @@ from PyQt5.QtWidgets import QApplication
 from mocca_gui.colormap import my_colormap
 from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
 
+# Centroid strength visual mapping (bundle edge-count -> visual emphasis)
+CENTROID_OPACITY_MIN = 0.3
+CENTROID_OPACITY_MAX = 1.0
+CENTROID_WIDTH_MIN_MULT = 1.0
+CENTROID_WIDTH_MAX_MULT = 3.0
+CENTROID_WIDTH_MAX_ABS = 12.0
+
 def plotline_ijk(plotter, edge, color, offset_multiplier=1.0, line_width=3, opacity=0.8):
     a = edge[0:3]
     b = edge[3:6]
@@ -248,6 +255,35 @@ class NetworkPlotter:
         if total_edges == 0:
             total_edges = 1
 
+        # Build strength normalization stats for centroid-enabled bundles in this view.
+        centroid_bundle_counts = []
+        for item in selection:
+            fcn = item['fcn']
+            bundle = item['bundle']
+            if bundle == "All":
+                bundles = np.unique(edges_net[edges_net[:, NETWORK_COL] == fcn][:, BUNDLE_COL])
+            else:
+                bundles = [bundle]
+
+            for b in bundles:
+                use_centroid = self.centroid_flags.get((fcn, int(b)), False)
+                if not use_centroid:
+                    continue
+                edge_count = int(np.sum(
+                    (edges_net[:, NETWORK_COL] == fcn) &
+                    (edges_net[:, BUNDLE_COL] == b)
+                ))
+                if edge_count > 0:
+                    centroid_bundle_counts.append(edge_count)
+
+        if centroid_bundle_counts:
+            centroid_log_counts = np.log1p(np.asarray(centroid_bundle_counts, dtype=np.float64))
+            centroid_log_min = float(np.min(centroid_log_counts))
+            centroid_log_max = float(np.max(centroid_log_counts))
+        else:
+            centroid_log_min = 0.0
+            centroid_log_max = 0.0
+
         edges_drawn = 0
 
         for item in selection:
@@ -282,6 +318,34 @@ class NetworkPlotter:
                 ]
 
                 if use_centroid and len(edges) > 0:
+                    bundle_count = len(edges)
+                    if centroid_log_max > centroid_log_min:
+                        strength_norm = (
+                            (np.log1p(bundle_count) - centroid_log_min) /
+                            (centroid_log_max - centroid_log_min)
+                        )
+                    else:
+                        # Single centroid bundle (or equal counts): treat as strongest.
+                        strength_norm = 1.0
+                    strength_norm = float(np.clip(strength_norm, 0.0, 1.0))
+
+                    # Width: keep at least 1x base thickness, but cap max growth.
+                    base_thickness = float(self.thicknesses.get((fcn, int(b)), 3))
+                    width_mult = (
+                        CENTROID_WIDTH_MIN_MULT +
+                        strength_norm * (CENTROID_WIDTH_MAX_MULT - CENTROID_WIDTH_MIN_MULT)
+                    )
+                    centroid_line_width = max(
+                        1.0,
+                        min(base_thickness * width_mult, CENTROID_WIDTH_MAX_ABS)
+                    )
+
+                    # Opacity: fixed visual range requested by user.
+                    centroid_opacity = (
+                        CENTROID_OPACITY_MIN +
+                        strength_norm * (CENTROID_OPACITY_MAX - CENTROID_OPACITY_MIN)
+                    )
+
                     # generate centroid edge
                     centroid_edge, boxes = generate_centroid_edge(
                         edges,
@@ -294,10 +358,16 @@ class NetworkPlotter:
                         centroid_edge,
                         color=color,
                         offset_multiplier=self.curvatures.get((fcn, int(b)), 1.0),
-                        line_width=self.thicknesses.get((fcn, int(b)), 3),
-                        opacity=self.opacities.get((fcn, int(b)), 0.8)
+                        line_width=centroid_line_width,
+                        opacity=centroid_opacity
                     )
                     self._edge_actors.append(actor)
+                    edges_drawn += len(edges)
+
+                    QApplication.processEvents()
+                    if progress_callback:
+                        percent = int((edges_drawn / total_edges) * 100)
+                        progress_callback(percent)
 
                 else:
 
@@ -342,4 +412,3 @@ class NetworkPlotter:
 
         self.plotter.reset_camera()
         self.plotter.render()
-
