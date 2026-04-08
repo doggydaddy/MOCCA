@@ -692,8 +692,11 @@ class MainWindow(QMainWindow):
             nth_distance = sorted_distances[n - 1]
             return nth_distance
         
-        # Find the 5th largest link distance
-        cut_distance = find_nth_largest_link(Z, 5)
+        # Pick cut distance based on the current number of FCNs in edges_net.
+        # (Previously hardcoded to 5, which could disagree with current recut.)
+        cut_distance = find_nth_largest_link(Z, num_fcns)
+        if cut_distance is None:
+            cut_distance = float(np.max(Z[:, 2])) if Z is not None and len(Z) > 0 else 0.0
 
         # Get unique bundles
         unique_bundles = np.unique(edges_net[:, BUNDLE_COL])
@@ -705,18 +708,9 @@ class MainWindow(QMainWindow):
             fcn = int(fcn_ids[0]) if len(fcn_ids) > 0 else -1
             bundle_to_fcn[int(b)] = fcn
 
-        # Map FCNs → colors from my_colormap
+        # Map FCNs -> colors using the same logic as live plotting:
+        # bundle override -> FCN "All" override -> default FCN color
         unique_fcns = sorted(set(bundle_to_fcn.values()))
-        fcn_colors = {}
-
-        for i, fcn in enumerate(unique_fcns):
-            color_arr = my_colormap.colors[i % len(my_colormap.colors)]
-            color_tuple = (
-                tuple(color_arr.tolist())
-                if hasattr(color_arr, "tolist")
-                else tuple(color_arr)
-            )
-            fcn_colors[fcn] = color_tuple
 
         # Build labels
         labels = [
@@ -730,21 +724,23 @@ class MainWindow(QMainWindow):
             b_int = int(b)
             fcn = bundle_to_fcn.get(b_int, -1)
 
-            # Check for custom bundle color
             bundle_color_idx = self.plotter.bundle_colors.get((fcn, b_int), None)
+            if bundle_color_idx is None:
+                bundle_color_idx = self.plotter.bundle_colors.get((fcn, "All"), None)
 
             if isinstance(bundle_color_idx, int):
-                # User picked custom color index → convert to tuple
                 color_arr = my_colormap.colors[bundle_color_idx]
-                color_tuple = (
-                    tuple(color_arr.tolist())
-                    if hasattr(color_arr, "tolist")
-                    else tuple(color_arr)
-                )
-                bundle_to_color[b_int] = color_tuple
+            elif fcn >= 0:
+                color_arr = my_colormap.colors[fcn % len(my_colormap.colors)]
             else:
-                # Default FCN color
-                bundle_to_color[b_int] = fcn_colors.get(fcn, (0.5, 0.5, 0.5, 1.0))
+                color_arr = (0.5, 0.5, 0.5, 1.0)
+
+            color_tuple = (
+                tuple(color_arr.tolist())
+                if hasattr(color_arr, "tolist")
+                else tuple(color_arr)
+            )
+            bundle_to_color[b_int] = color_tuple
 
         # Build fcn_to_color
         fcn_to_color = {}

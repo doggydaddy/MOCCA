@@ -10,7 +10,6 @@ def show_dendrogram(
 ):
     import matplotlib.pyplot as plt
     from scipy.cluster.hierarchy import dendrogram
-    from scipy.cluster import hierarchy
     import matplotlib.colors as mcolors
     import numpy as np
     import re
@@ -18,47 +17,79 @@ def show_dendrogram(
     plt.figure(figsize=(10, 6))
 
     thresh = cut_distance + 0.01
-    print("fcn_to_color:", fcn_to_color)
-    # Convert RGBA floats → hex color strings
-    def rgba_to_hex(rgba):
-        hex_color = rgba[:3]
-        return mcolors.to_hex(hex_color)
-    fcn_palette_hex = [rgba_to_hex(c) for c in fcn_to_color.values()]
-    hierarchy.set_link_color_palette(fcn_palette_hex)
+
+    # Convert RGBA/RGB floats -> hex color string
+    def rgba_to_hex(color):
+        return mcolors.to_hex(color[:3])
+
+    # Parse bundle IDs from labels; labels are generated as "B{bundle} (FCN{...})"
+    leaf_bundle_ids = []
+    for label in labels:
+        m = re.match(r"B(\d+)", str(label))
+        leaf_bundle_ids.append(int(m.group(1)) if m else None)
+
+    default_hex = rgba_to_hex((0.5, 0.5, 0.5, 1.0))
+    leaf_hex_colors = [
+        rgba_to_hex(bundle_to_color.get(bid, (0.5, 0.5, 0.5, 1.0)))
+        if bid is not None else default_hex
+        for bid in leaf_bundle_ids
+    ]
+
+    # Build descendants' color sets for each internal node (id: n..2n-2)
+    n_leaves = len(labels)
+    node_color_sets = {}
+    node_heights = {}
+
+    for i, row in enumerate(Z):
+        node_id = n_leaves + i
+        left = int(row[0])
+        right = int(row[1])
+        dist = float(row[2])
+
+        if left < n_leaves:
+            left_colors = {leaf_hex_colors[left]}
+        else:
+            left_colors = node_color_sets.get(left, {default_hex})
+
+        if right < n_leaves:
+            right_colors = {leaf_hex_colors[right]}
+        else:
+            right_colors = node_color_sets.get(right, {default_hex})
+
+        node_color_sets[node_id] = left_colors | right_colors
+        node_heights[node_id] = dist
+
+    def link_color_func(k):
+        """
+        Color links by bundle colors:
+        - above threshold: grey
+        - below threshold and pure-color subtree: that color
+        - below threshold but mixed descendant colors: grey
+        """
+        if k < n_leaves:
+            return leaf_hex_colors[k]
+        if node_heights.get(k, np.inf) > thresh:
+            return "grey"
+        color_set = node_color_sets.get(k, {default_hex})
+        if len(color_set) == 1:
+            return next(iter(color_set))
+        return "grey"
+
     dendro = dendrogram(
         Z,
         labels=labels,
         leaf_rotation=90,
         leaf_font_size=8,
+        link_color_func=link_color_func,
         color_threshold=thresh,
         above_threshold_color="grey"
     )
     plt.axhline(y=thresh, c='grey', lw=1, linestyle='dashed')
 
     leaf_order = dendro["leaves"]
-    ivl = dendro["ivl"]
 
-    # Extract bundle IDs from labels
-    bundle_ids = []
-    for label in ivl:
-        m = re.match(r"B(\d+)", label)
-        if m:
-            bundle_id = int(m.group(1))
-        else:
-            bundle_id = None
-        bundle_ids.append(bundle_id)
-
-    # Create leaf colors dynamically
-    ordered_leaf_colors = []
-    for bundle_id in bundle_ids:
-        if bundle_id is None:
-            color = (0.5, 0.5, 0.5, 1.0)
-        else:
-            color = bundle_to_color.get(
-                bundle_id,
-                (0.5, 0.5, 0.5, 1.0)  # fallback grey
-            )
-        ordered_leaf_colors.append(color)
+    # Reorder leaf colors to plotted order and color x tick labels
+    ordered_leaf_colors = [leaf_hex_colors[idx] for idx in leaf_order]
 
     ax = plt.gca()
     tick_labels = ax.get_xticklabels()
