@@ -37,9 +37,17 @@
 #      networks is an explicit parameter and can be changed after the fact
 #      via recut_networks() without re-running the full pipeline.
 
+import hashlib
+import json
+import platform
+import subprocess
+import tempfile
+from datetime import datetime, timezone
+
 import numpy as np
 import os
 import pandas as pd
+import scipy
 from collections import defaultdict, Counter
 
 from scipy.cluster.hierarchy import fcluster
@@ -70,13 +78,123 @@ def get_cache_paths_v2(input_csv):
     return base + '_v2_processed.csv', base + '_v2_linkage.npy'
 
 
+def get_params_path_v2(input_csv):
+    '''Return the provenance sidecar path for a v2 cache set.'''
+    base = os.path.splitext(input_csv)[0]
+    return base + '_v2_params.json'
+
+
+def is_processed_input_v2(input_csv):
+    '''Return True when a v2 processed cache was supplied as raw input.'''
+    return os.path.basename(os.fspath(input_csv)).lower().endswith(
+        '_v2_processed.csv'
+    )
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _software_metadata():
+    metadata = {
+        'python_version': platform.python_version(),
+        'numpy_version': np.__version__,
+        'pandas_version': pd.__version__,
+        'scipy_version': scipy.__version__,
+    }
+    try:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        commit = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=repo_root,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ['git', 'status', '--porcelain'], cwd=repo_root,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        metadata['git_commit'] = commit
+        metadata['git_dirty'] = bool(dirty)
+    except (OSError, subprocess.SubprocessError):
+        metadata['git_commit'] = None
+        metadata['git_dirty'] = None
+    return metadata
+
+
+def load_params_v2(input_csv):
+    '''Load a v2 provenance sidecar, returning None for legacy caches.'''
+    path = get_params_path_v2(input_csv)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def cache_validation_v2(input_csv, expected_parameters=None):
+    '''Return ``(valid, reason)`` for automatic reuse of a v2 cache.'''
+    if not cache_exists_v2(input_csv):
+        return False, 'processed CSV or linkage file is missing'
+
+    manifest = load_params_v2(input_csv)
+    if manifest is None:
+        return False, 'parameter manifest is missing or unreadable'
+
+    recorded_hash = manifest.get('input', {}).get('sha256')
+    if not recorded_hash:
+        return False, 'input checksum is missing from the manifest'
+    try:
+        if recorded_hash != _sha256_file(input_csv):
+            return False, 'input CSV checksum differs from the manifest'
+    except OSError as exc:
+        return False, f'input CSV could not be hashed: {exc}'
+
+    outputs = manifest.get('outputs', {})
+    for output_path, hash_key, label in (
+        (get_cache_paths_v2(input_csv)[0], 'processed_csv_sha256', 'processed CSV'),
+        (get_cache_paths_v2(input_csv)[1], 'linkage_npy_sha256', 'linkage file'),
+    ):
+        expected_hash = outputs.get(hash_key)
+        if not expected_hash:
+            return False, f'{label} checksum is missing from the manifest'
+        try:
+            if expected_hash != _sha256_file(output_path):
+                return False, f'{label} checksum differs from the manifest'
+        except OSError as exc:
+            return False, f'{label} could not be hashed: {exc}'
+
+    if expected_parameters is not None:
+        recorded = manifest.get('parameters')
+        if recorded is not None and manifest.get('recuts'):
+            # A persisted recut changes only the active network cut; all
+            # preprocessing parameters still describe the original run.
+            recorded = dict(recorded)
+            recorded['nr_networks'] = manifest.get('results', {}).get(
+                'networks', recorded.get('nr_networks')
+            )
+        if recorded != expected_parameters:
+            return False, 'requested parameters differ from the manifest'
+
+    return True, 'cache and manifest match'
+
+
 def cache_exists_v2(input_csv):
     '''Return True if both v2 cache files exist for *input_csv*.'''
     csv_path, npy_path = get_cache_paths_v2(input_csv)
     return os.path.isfile(csv_path) and os.path.isfile(npy_path)
 
 
-def save_result_v2(input_csv, result):
+def save_result_v2(input_csv, result, parameters=None, invocation='api',
+                   started_at=None, recut=None, output_csv=None):
     '''
     Persist a v2 pipeline result dict to disk.
 
@@ -86,8 +204,19 @@ def save_result_v2(input_csv, result):
     <stem>_v2_linkage.npy    – linkage matrix as a binary .npy file, or a
                                zero-length placeholder when linkage_matrix
                                is None (v2 pipeline does not produce one).
+    <stem>_v2_params.json    – parameters, checksums, timestamps, result
+                               counts, software versions, and recut history.
     '''
-    csv_path, npy_path = get_cache_paths_v2(input_csv)
+    if output_csv is None:
+        csv_path, npy_path = get_cache_paths_v2(input_csv)
+        params_path = get_params_path_v2(input_csv)
+    else:
+        csv_path = os.path.abspath(output_csv)
+        output_base = os.path.splitext(csv_path)[0]
+        if output_base.endswith('_processed'):
+            output_base = output_base[:-len('_processed')]
+        npy_path = output_base + '_linkage.npy'
+        params_path = output_base + '_params.json'
 
     edges_net = result['edges_net']
     n_cols = edges_net.shape[1]
@@ -95,10 +224,98 @@ def save_result_v2(input_csv, result):
     if n_cols > len(_CACHE_COLUMNS):
         cols += [f'col{i}' for i in range(len(_CACHE_COLUMNS), n_cols)]
 
-    pd.DataFrame(edges_net, columns=cols).to_csv(csv_path, index=False)
-
     lm = result.get('linkage_matrix')
-    np.save(npy_path, lm if lm is not None else np.array([]))
+    cache_dir = os.path.dirname(os.path.abspath(csv_path))
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Replace completed temporary files so interrupted writes do not leave a
+    # partially-written cache that appears valid.
+    csv_tmp = tempfile.NamedTemporaryFile(
+        mode='w', encoding='utf-8', suffix='.csv', dir=cache_dir, delete=False,
+    )
+    npy_tmp = tempfile.NamedTemporaryFile(
+        mode='wb', suffix='.npy', dir=cache_dir, delete=False,
+    )
+    try:
+        with csv_tmp:
+            pd.DataFrame(edges_net, columns=cols).to_csv(csv_tmp, index=False)
+        with npy_tmp:
+            np.save(npy_tmp, lm if lm is not None else np.array([]))
+        os.replace(csv_tmp.name, csv_path)
+        os.replace(npy_tmp.name, npy_path)
+    finally:
+        for temporary_path in (csv_tmp.name, npy_tmp.name):
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+    manifest = None
+    if parameters is None and os.path.isfile(params_path):
+        try:
+            with open(params_path, 'r', encoding='utf-8') as handle:
+                manifest = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            manifest = None
+    new_manifest = manifest is None or parameters is not None
+    if manifest is None:
+        manifest = {
+            'schema_version': 1,
+            'pipeline': 'coffee-dac-v2',
+            'parameters': parameters,
+            'recuts': [],
+        }
+
+    input_rows = int(pd.read_csv(input_csv, usecols=[0]).shape[0])
+    completed_at = _utc_now()
+    manifest.update({
+        'schema_version': 1,
+        'pipeline': 'coffee-dac-v2',
+        'last_updated_at': completed_at,
+        'input': {
+            'path': os.path.abspath(input_csv),
+            'sha256': _sha256_file(input_csv),
+            'rows': input_rows,
+        },
+        'results': {
+            'retained_edges': int(edges_net.shape[0]),
+            'bundles': int(len(np.unique(edges_net[:, BUNDLE_COL]))) if len(edges_net) else 0,
+            'networks': int(len(np.unique(edges_net[:, NETWORK_COL]))) if len(edges_net) else 0,
+        },
+        'outputs': {
+            'processed_csv': os.path.basename(csv_path),
+            'processed_csv_sha256': _sha256_file(csv_path),
+            'linkage_npy': os.path.basename(npy_path),
+            'linkage_npy_sha256': _sha256_file(npy_path),
+        },
+    })
+    if new_manifest:
+        manifest.update({
+            'created_at': started_at or completed_at,
+            'completed_at': completed_at,
+            'invocation': invocation,
+            'software': _software_metadata(),
+        })
+    if parameters is not None:
+        manifest['parameters'] = parameters
+        manifest['recuts'] = []
+    if recut is not None:
+        manifest.setdefault('recuts', []).append({
+            'created_at': _utc_now(),
+            'requested_networks': int(recut['requested_networks']),
+            'actual_networks': int(recut['actual_networks']),
+            'invocation': invocation,
+        })
+
+    json_tmp = tempfile.NamedTemporaryFile(
+        mode='w', encoding='utf-8', suffix='.json', dir=cache_dir, delete=False,
+    )
+    try:
+        with json_tmp:
+            json.dump(manifest, json_tmp, indent=2, sort_keys=True)
+            json_tmp.write('\n')
+        os.replace(json_tmp.name, params_path)
+    finally:
+        if os.path.exists(json_tmp.name):
+            os.unlink(json_tmp.name)
 
 
 def load_cached_result_v2(input_csv):
@@ -111,7 +328,11 @@ def load_cached_result_v2(input_csv):
     csv_path, npy_path = get_cache_paths_v2(input_csv)
     edges_net = pd.read_csv(csv_path).to_numpy()
     linkage_matrix = np.load(npy_path)
-    return {"edges_net": edges_net, "linkage_matrix": linkage_matrix}
+    return {
+        "edges_net": edges_net,
+        "linkage_matrix": linkage_matrix,
+        "provenance": load_params_v2(input_csv),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +1060,8 @@ def recut_networks(edges_net, linkage_matrix, nr_networks):
 
 def process_edge_data_v2(input_csv, progress_callback=None, neighbor_dist=1.0,
                          top_n=None, tstat_threshold=None, min_network_size=2,
-                         min_cluster_voxels=3, nr_networks=5, strict_bundles=False):
+                         min_cluster_voxels=3, nr_networks=5, strict_bundles=False,
+                         invocation='api', allow_processed_input=False):
     '''
     V2 pipeline:
       0. (optional) tstat pre-filter
@@ -864,6 +1086,10 @@ def process_edge_data_v2(input_csv, progress_callback=None, neighbor_dist=1.0,
                                   + neighbouring free endpoint) instead of the
                                   standard CC bundler.  Produces many smaller
                                   bundles on dense datasets (default False).
+    invocation           : str  – provenance source such as 'api', 'cli', or
+                                  'gui'.
+    allow_processed_input: bool – permit an existing `_v2_processed.csv` to be
+                                  treated as raw input (default False).
 
     Returns
     -------
@@ -871,6 +1097,26 @@ def process_edge_data_v2(input_csv, progress_callback=None, neighbor_dist=1.0,
         edges_net, linkage_matrix, kept_mask, tstat_mask, isolation_mask,
         size_mask, prune_mask, ep_cluster_mask, nr_networks_out
     '''
+
+    if is_processed_input_v2(input_csv) and not allow_processed_input:
+        raise ValueError(
+            "Refusing to process a '_v2_processed.csv' cache as raw input. "
+            "Select the original CSV instead, or explicitly allow processed "
+            "input if this is intentional."
+        )
+
+    started_at = _utc_now()
+    parameters = {
+        'neighbor_dist': float(neighbor_dist),
+        'top_n': int(top_n) if top_n is not None else None,
+        'tstat_threshold': (
+            float(tstat_threshold) if tstat_threshold is not None else None
+        ),
+        'min_network_size': int(min_network_size),
+        'min_cluster_voxels': int(min_cluster_voxels),
+        'nr_networks': int(nr_networks),
+        'strict_bundles': bool(strict_bundles),
+    }
 
     # ------------------------------------------------------------------ load
     edges_ijk = pd.read_csv(input_csv)
@@ -993,7 +1239,13 @@ def process_edge_data_v2(input_csv, progress_callback=None, neighbor_dist=1.0,
         "nr_networks_out":  nr_net,
     }
 
-    save_result_v2(input_csv, result)
+    save_result_v2(
+        input_csv,
+        result,
+        parameters=parameters,
+        invocation=invocation,
+        started_at=started_at,
+    )
     if progress_callback:
         progress_callback(100)
 

@@ -67,6 +67,7 @@ class EdgeDataLoaderWorker(QThread):
                 result = process_edge_data_v2(
                     self.file_path,
                     progress_callback=self.progress.emit,
+                    invocation='gui',
                     **self.v2_kwargs,
                 )
         else:

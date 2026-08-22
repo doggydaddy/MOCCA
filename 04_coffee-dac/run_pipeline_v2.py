@@ -57,19 +57,18 @@ if SCRIPT_DIR not in sys.path:
 from coffee_dac_pipeline_v2 import (
     process_edge_data_v2,
     cache_exists_v2,
+    cache_validation_v2,
     load_cached_result_v2,
     get_cache_paths_v2,
+    is_processed_input_v2,
     save_result_v2,
     recut_networks,
-    TSTAT_COL,
 )
 from coffee_dac_pipeline import (
     BUNDLE_COL,
     NETWORK_COL,
-    _CACHE_COLUMNS,
 )
 import numpy as np
-import pandas as pd
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +186,14 @@ def build_parser():
              're-running the full pipeline.  Requires a v2 cache to exist. '
              'Overwrites the processed CSV with updated network labels.',
     )
+    p.add_argument(
+        '--allow-processed-input',
+        action='store_true',
+        default=False,
+        help="Allow a file ending in '_v2_processed.csv' to be treated as "
+             'raw input. This is blocked by default to prevent nested cache '
+             'names and accidental reprocessing.',
+    )
     return p
 
 
@@ -198,6 +205,15 @@ def main():
     if not os.path.isfile(input_csv):
         print(f'ERROR: input file not found: {input_csv}', file=sys.stderr)
         sys.exit(1)
+
+    if is_processed_input_v2(input_csv) and not args.allow_processed_input:
+        print(
+            "ERROR: refusing to process a '_v2_processed.csv' cache as raw "
+            'input. Select the original CSV, or pass '
+            '--allow-processed-input if this is intentional.',
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.top_n is not None and args.tstat_threshold is not None:
         print('ERROR: --top-n and --tstat-threshold are mutually exclusive.',
@@ -226,7 +242,15 @@ def main():
         )
         cached['edges_net'] = edges_out
         cached['nr_networks_out'] = nr_net
-        save_result_v2(input_csv, cached)
+        save_result_v2(
+            input_csv,
+            cached,
+            invocation='cli',
+            recut={
+                'requested_networks': args.recut,
+                'actual_networks': nr_net,
+            },
+        )
         print(f'  → {nr_net} network(s) saved to {default_csv}')
         return
 
@@ -248,16 +272,24 @@ def main():
     # ------------------------------------------------------------------
     # Fast path: load from cache
     # ------------------------------------------------------------------
-    # Any tstat filter or non-default min_size/min_cluster_voxels makes cache stale
-    tstat_filtering = args.top_n is not None or args.tstat_threshold is not None
+    expected_parameters = {
+        'neighbor_dist': float(args.neighbor_dist),
+        'top_n': int(args.top_n) if args.top_n is not None else None,
+        'tstat_threshold': (
+            float(args.tstat_threshold)
+            if args.tstat_threshold is not None else None
+        ),
+        'min_network_size': int(args.min_size),
+        'min_cluster_voxels': int(args.min_cluster_voxels),
+        'nr_networks': int(args.networks),
+        'strict_bundles': bool(args.strict_bundles),
+    }
+    cache_valid, cache_reason = cache_validation_v2(
+        input_csv, expected_parameters
+    )
     use_cache = (
         not args.reprocess
-        and not tstat_filtering
-        and not args.strict_bundles
-        and args.networks == 5
-        and args.min_size == 2
-        and args.min_cluster_voxels == 3
-        and cache_exists_v2(input_csv)
+        and cache_valid
         # Only use the default cache when the output destination matches it;
         # otherwise we must rerun to write to the requested path.
         and os.path.abspath(default_csv) == output_csv
@@ -273,6 +305,8 @@ def main():
         # Full v2 pipeline
         # ------------------------------------------------------------------
         print('Running v2 pipeline…')
+        if cache_exists_v2(input_csv) and not args.reprocess:
+            print(f'Existing cache not reused: {cache_reason}.')
         progress = make_progress_callback()
 
         result = process_edge_data_v2(
@@ -285,43 +319,62 @@ def main():
             min_cluster_voxels=args.min_cluster_voxels,
             nr_networks=args.networks,
             strict_bundles=args.strict_bundles,
+            invocation='cli',
+            allow_processed_input=args.allow_processed_input,
         )
 
         # process_edge_data_v2 already saves to the default v2 cache path.
         # If the user asked for a different output path, write there too.
         if os.path.abspath(default_csv) != output_csv:
-            edges_net = result['edges_net']
-            n_cols = edges_net.shape[1]
-            cols = _CACHE_COLUMNS[:n_cols]
-            if n_cols > len(_CACHE_COLUMNS):
-                cols += [f'col{i}' for i in range(len(_CACHE_COLUMNS), n_cols)]
-            os.makedirs(os.path.dirname(output_csv) or '.', exist_ok=True)
-            pd.DataFrame(edges_net, columns=cols).to_csv(output_csv, index=False)
-            print(f'Also saved to: {output_csv}')
+            save_result_v2(
+                input_csv,
+                result,
+                parameters=expected_parameters,
+                invocation='cli',
+                output_csv=output_csv,
+            )
+            print(f'Also saved result set for: {output_csv}')
 
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     edges_net  = result['edges_net']
     n_edges    = edges_net.shape[0]
-    n_networks = result.get('nr_networks_out', int(edges_net[:, NETWORK_COL].max()) + 1 if n_edges else 0)
+    n_networks = result.get(
+        'nr_networks_out',
+        len(np.unique(edges_net[:, NETWORK_COL])) if n_edges else 0,
+    )
     kept_mask  = result.get('kept_mask')
     tstat_mask = result.get('tstat_mask')
-
-    n_original = int(kept_mask.shape[0]) if kept_mask is not None else '?'
-    n_removed  = int((~kept_mask).sum()) if kept_mask is not None else '?'
+    provenance = result.get('provenance') or {}
+    if kept_mask is not None:
+        n_original = int(kept_mask.shape[0])
+        n_removed = int((~kept_mask).sum())
+    else:
+        n_original = provenance.get('input', {}).get('rows')
+        n_removed = (
+            int(n_original) - n_edges if n_original is not None else None
+        )
 
     print()
     print('─' * 52)
-    if tstat_mask is not None:
+    if n_original is None:
+        print('  Input edges       : unknown (legacy cache)')
+    else:
+        print(f'  Input edges       : {int(n_original):,}')
+
+    if kept_mask is None:
+        if n_removed is not None:
+            print(f'  Removed (total)   : {n_removed:,}')
+    elif tstat_mask is not None:
         n_tstat_kept = int(tstat_mask.sum())
         n_tstat_removed = int((~tstat_mask).sum())
-        print(f'  Input edges       : {n_original:,}')
         print(f'  Removed (tstat)   : {n_tstat_removed:,}  → {n_tstat_kept:,} kept')
-    else:
-        print(f'  Input edges       : {n_original:,}')
-    n_isolation_removed = n_removed - (int((~tstat_mask).sum()) if tstat_mask is not None else 0)
-    print(f'  Removed (isolated): {n_isolation_removed:,}')
+    if kept_mask is not None:
+        n_isolation_removed = n_removed - (
+            int((~tstat_mask).sum()) if tstat_mask is not None else 0
+        )
+        print(f'  Removed (isolated): {n_isolation_removed:,}')
     n_size_removed = int(result['size_mask'].shape[0] - result['size_mask'].sum()) if result.get('size_mask') is not None else 0
     if n_size_removed:
         print(f'  Removed (size<{args.min_size:2d}) : {n_size_removed:,}')

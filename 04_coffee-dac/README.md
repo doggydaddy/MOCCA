@@ -54,6 +54,38 @@ $value$ is the weight of the connection. Currently, the framework only support
 *thresholded* connections, hence $value$ is not used and assumed to take the
 value of $1$.
 
+## Processing provenance and v2 caches
+
+Every successful v2 processing run writes a three-file result set beside the
+original input CSV:
+
+```text
+<input>_v2_processed.csv
+<input>_v2_linkage.npy
+<input>_v2_params.json
+```
+
+The JSON sidecar is the authoritative processing record. It contains all
+resolved pipeline parameters, including defaults; input and output SHA-256
+checksums; input/result counts; UTC timestamps; whether the run came from the
+GUI, CLI, or API; Python/package versions; and the Git commit when available.
+Persisted network re-cuts are appended to its `recuts` history.
+
+The command-line pipeline automatically reuses a cache only when its input
+checksum, output checksums, and complete parameter set match the manifest.
+Legacy cache pairs without a parameter sidecar remain loadable through the GUI,
+where they are identified as having unavailable parameter metadata, but the CLI
+will reprocess them rather than assume their settings.
+
+The GUI displays the recorded v2 parameters before loading a cache. Processing
+performed directly by the GUI uses the v2 defaults and records those resolved
+values in the same sidecar format.
+
+Files ending in `_v2_processed.csv` are rejected as raw pipeline inputs by
+default. This prevents accidental names such as
+`_v2_processed_v2_processed.csv`. The CLI provides
+`--allow-processed-input` for deliberate exceptional use.
+
 ## FCN and Bundles filtering
 
 The FCN:s and bundles are organized in a tree system. In order to get a plot you have to

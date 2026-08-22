@@ -137,7 +137,12 @@ class MainWindow(QMainWindow):
     def load_data_dialog(self):
         from mocca_gui.data_loader import EdgeDataLoaderWorker
         from coffee_dac_pipeline import cache_exists
-        from coffee_dac_pipeline_v2 import cache_exists_v2
+        from coffee_dac_pipeline_v2 import (
+            cache_exists_v2,
+            cache_validation_v2,
+            is_processed_input_v2,
+            load_params_v2,
+        )
 
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Edge CSV", "", "CSV Files (*.csv)"
@@ -145,8 +150,23 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        if is_processed_input_v2(path):
+            QMessageBox.warning(
+                self,
+                "Processed cache selected",
+                "This is a v2 processed cache, not a raw input CSV.\n\n"
+                "Select the corresponding original CSV instead. Loading a "
+                "processed cache as input would create nested names such as "
+                "'_v2_processed_v2_processed.csv'.",
+            )
+            return
+
         has_v1 = cache_exists(path)
         has_v2 = cache_exists_v2(path)
+        v2_manifest = load_params_v2(path) if has_v2 else None
+        v2_cache_valid, v2_cache_reason = (
+            cache_validation_v2(path) if has_v2 else (False, None)
+        )
 
         # --- Build the prompt dialog when any cache exists ---
         pipeline = 'v1'
@@ -161,6 +181,34 @@ class MainWindow(QMainWindow):
             cache_info = []
             if has_v2:
                 cache_info.append("  • v2 cache (processed CSV + linkage matrix)")
+                if v2_manifest is not None:
+                    params = v2_manifest.get('parameters') or {}
+                    results = v2_manifest.get('results') or {}
+                    cache_info.append(
+                        "    Recorded parameters: "
+                        f"networks={params.get('nr_networks', '?')}, "
+                        f"min-size={params.get('min_network_size', '?')}, "
+                        "min-cluster-voxels="
+                        f"{params.get('min_cluster_voxels', '?')}, "
+                        f"neighbor-dist={params.get('neighbor_dist', '?')}, "
+                        f"strict-bundles={params.get('strict_bundles', '?')}, "
+                        f"top-n={params.get('top_n')}, "
+                        f"tstat-threshold={params.get('tstat_threshold')}\n"
+                        "    Result: "
+                        f"{results.get('retained_edges', '?')} edges, "
+                        f"{results.get('bundles', '?')} bundles, "
+                        f"{results.get('networks', '?')} networks\n"
+                        "    Completed: "
+                        f"{v2_manifest.get('completed_at', 'unknown')}"
+                    )
+                else:
+                    cache_info.append(
+                        "    Parameter metadata unavailable (legacy cache)"
+                    )
+                if not v2_cache_valid and v2_manifest is not None:
+                    cache_info.append(
+                        f"    Warning: cache validation failed: {v2_cache_reason}"
+                    )
             if has_v1:
                 cache_info.append("  • v1 cache (processed CSV + linkage matrix)")
             layout.addWidget(QLabel(
@@ -185,7 +233,14 @@ class MainWindow(QMainWindow):
             recut_label = QLabel("Cut into N networks (v2 cache only):")
             recut_spin = QSpinBox(dialog)
             recut_spin.setRange(2, 50)
-            recut_spin.setValue(5)
+            recorded_networks = (
+                (v2_manifest or {}).get('results', {}).get('networks', 5)
+            )
+            try:
+                recorded_networks = int(recorded_networks)
+            except (TypeError, ValueError):
+                recorded_networks = 5
+            recut_spin.setValue(max(2, min(50, recorded_networks)))
             recut_layout.addWidget(recut_label)
             recut_layout.addWidget(recut_spin)
             layout.addWidget(recut_widget)
