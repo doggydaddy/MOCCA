@@ -240,6 +240,17 @@ class NetworkPlotter:
     ):
         self.clear()   # removes previous edge actors only; brain meshes untouched
 
+        def plotting_cancelled():
+            """Process pending GUI input and report whether Cancel was clicked."""
+            QApplication.processEvents()
+            if stop_flag and stop_flag():
+                print("Plotting cancelled.")
+                return True
+            return False
+
+        if plotting_cancelled():
+            return False
+
         total_edges = sum(
             len(edges_net[
                 (edges_net[:,NETWORK_COL] == item['fcn']) &
@@ -258,6 +269,9 @@ class NetworkPlotter:
         # Build strength normalization stats for centroid-enabled bundles in this view.
         centroid_bundle_counts = []
         for item in selection:
+            if plotting_cancelled():
+                return False
+
             fcn = item['fcn']
             bundle = item['bundle']
             if bundle == "All":
@@ -266,6 +280,9 @@ class NetworkPlotter:
                 bundles = [bundle]
 
             for b in bundles:
+                if plotting_cancelled():
+                    return False
+
                 use_centroid = self.centroid_flags.get((fcn, int(b)), False)
                 if not use_centroid:
                     continue
@@ -287,6 +304,9 @@ class NetworkPlotter:
         edges_drawn = 0
 
         for item in selection:
+            if plotting_cancelled():
+                return False
+
             fcn = item['fcn']
             bundle = item['bundle']
 
@@ -296,6 +316,9 @@ class NetworkPlotter:
                 bundles = [bundle]
 
             for b in bundles:
+                if plotting_cancelled():
+                    return False
+
                 # check bundle color first, then FCN-wide color
                 idx = self.bundle_colors.get((fcn, int(b)))
 
@@ -318,6 +341,9 @@ class NetworkPlotter:
                 ]
 
                 if use_centroid and len(edges) > 0:
+                    if plotting_cancelled():
+                        return False
+
                     bundle_count = len(edges)
                     if centroid_log_max > centroid_log_min:
                         strength_norm = (
@@ -364,7 +390,8 @@ class NetworkPlotter:
                     self._edge_actors.append(actor)
                     edges_drawn += len(edges)
 
-                    QApplication.processEvents()
+                    if plotting_cancelled():
+                        return False
                     if progress_callback:
                         percent = int((edges_drawn / total_edges) * 100)
                         progress_callback(percent)
@@ -372,9 +399,8 @@ class NetworkPlotter:
                 else:
 
                     for edge in edges:
-                        if stop_flag and stop_flag():
-                            print("Plotting cancelled.")
-                            return
+                        if plotting_cancelled():
+                            return False
 
                         thickness = self.thicknesses.get((fcn, int(b)), 3)
                         curvature = self.curvatures.get((fcn, int(b)), 1.0)
@@ -402,13 +428,14 @@ class NetworkPlotter:
 
                         edges_drawn += 1
 
-                        # call processEvents() every N edges
+                        # Updating the progress value less frequently avoids
+                        # unnecessary dialog repaints. Cancellation is checked
+                        # above for every edge.
                         if edges_drawn % 10 == 0:
-                            QApplication.processEvents()
-
                             if progress_callback:
                                 percent = int((edges_drawn / total_edges) * 100)
                                 progress_callback(percent)
 
         self.plotter.reset_camera()
         self.plotter.render()
+        return True

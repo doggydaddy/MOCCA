@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 04_coffee-dac/data
+04_coffee-dac/results
 .vscode/settings.json
 
 test*

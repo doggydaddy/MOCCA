@@ -23,7 +23,6 @@ class PlotWorker(QThread):
             stop_flag=lambda: self._is_cancelled,
             progress_callback=self.progress.emit
         )
-        self.plotter.draw_selection(..., progress_callback=self.progress.emit)
         self.finished.emit()
 
     def cancel(self):

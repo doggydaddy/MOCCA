@@ -276,6 +276,10 @@ class MainWindow(QMainWindow):
         def cancel_plot():
             cancelled_flag[0] = True
 
+        # QProgressDialog does not stop synchronous work by itself.  Record the
+        # cancellation so draw_selection can leave its rendering loops.
+        self.progress_dialog.canceled.connect(cancel_plot)
+
         self.plotter.draw_selection(
             self.edges_net,
             selection,
