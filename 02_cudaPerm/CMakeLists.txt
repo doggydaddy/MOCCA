@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.9)
-project(cudaPerm LANGUAGES CUDA C)
+project(cudaPerm LANGUAGES CUDA C CXX)
 include(CheckLanguage)
 check_language(CUDA)
 
@@ -16,10 +16,6 @@ if (OPENMP_FOUND)
 endif()
 find_package(CUDA REQUIRED)
 
-add_executable(permutationTest_cuda permutationTest_cuda.cu)
-target_compile_options(permutationTest_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
-target_link_libraries(permutationTest_cuda PRIVATE gomp)
-
 add_executable(permutationTest_cuda_fwer
     permutationTest_cuda_fwer.cu
     perm_kernels.cu
@@ -29,5 +25,18 @@ target_include_directories(permutationTest_cuda_fwer PRIVATE ${CMAKE_CURRENT_SOU
 target_compile_options(permutationTest_cuda_fwer PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
 target_link_libraries(permutationTest_cuda_fwer PRIVATE gomp)
 
-add_executable(permutationTest_omp permutationTest_omp.c)
-target_link_libraries(permutationTest_omp PRIVATE gomp m)
+# Separate sparse backend for bundle-level permutation FWER.  This does not
+# alter either established permutation executable.
+add_executable(permutationTest_cuda_bundle
+    permutationTest_cuda_bundle.cu
+    ccmat_io.c)
+target_include_directories(permutationTest_cuda_bundle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(permutationTest_cuda_bundle PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
+target_link_libraries(permutationTest_cuda_bundle PRIVATE gomp)
+
+# Optimized deterministic bundle formation for sparse permutation outputs.
+# Python remains the reference implementation and is not modified/replaced.
+add_executable(bundle_fwer_omp bundle_fwer_omp.cpp)
+target_compile_features(bundle_fwer_omp PRIVATE cxx_std_17)
+target_compile_options(bundle_fwer_omp PRIVATE -O3 -fopenmp)
+target_link_libraries(bundle_fwer_omp PRIVATE gomp)

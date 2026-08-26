@@ -42,3 +42,5 @@ templates/
 # Root-level environment snapshot (project uses 04_coffee-dac/requirements.txt)
 /requirements.txt
 
+# Local conversation records (may contain machine paths and working notes)
+/conversation_archives_*.md

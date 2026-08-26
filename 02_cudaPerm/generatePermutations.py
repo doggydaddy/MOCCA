@@ -26,6 +26,10 @@ parser.add_argument('-nB', '--numberGroupB',
                     help='number of indices in group B')
 parser.add_argument('-o', '--outputfile',
                     help='output filepath')
+parser.add_argument('--seed',
+                    type=int,
+                    default=None,
+                    help='random seed for reproducible permutation generation')
 
 args = parser.parse_args(args=None if sys.argv[1:] else ['--help'])
 
@@ -33,6 +37,10 @@ nA = int(args.numberGroupA)
 nB = int(args.numberGroupB)
 nrp = int(args.numberPermutations)
 outputfile = args.outputfile
+
+if args.seed is not None:
+    random.seed(args.seed)
+    print("random seed", args.seed)
 
 print("creating", str(nrp), "permutations")
 print(str(nA), "in one group")

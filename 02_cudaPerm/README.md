@@ -1,5 +1,11 @@
 # CUDA accelerated permutation testing
 
+> **Archive note (2026-08-26):** The original edgewise, uncorrected-p CUDA and
+> OpenMP executables documented in the historical sections below have moved to
+> `archives/uncorrected_p_pipeline_2026_08_26/`. Their complete changelog,
+> validation script, and test fixtures are preserved there. The active module
+> root now contains the max-statistic and bundle-level FWER implementations.
+
 This subroutines performs connection-wise permutation tests.
 
 The statistical tests are performed independently for each voxel, so the tests
@@ -16,7 +22,8 @@ A **critical bug** in the p-value calculation was fixed on March 7, 2026. If you
 
 **Action required:** 
 - Rerun analyses performed before March 7, 2026
-- See `CHANGELOG.md` for complete details on all bug fixes and improvements
+- See `archives/uncorrected_p_pipeline_2026_08_26/CHANGELOG.md` for complete
+  details on the archived edgewise implementation.
 
 ## ⚡ Performance (March 29, 2026)
 
@@ -31,7 +38,8 @@ The CUDA kernel has been **completely reworked** to exploit GPU parallelism prop
 | 37 subjects, 1M perms | 185 | ~277 days | ~1.5–2 days |
 | 257 subjects, 1M perms | 1299 | years | ~2–3 days |
 
-See `CHANGELOG.md` [v3.2] for the full technical details.
+See `archives/uncorrected_p_pipeline_2026_08_26/CHANGELOG.md` [v3.2] for the
+full technical details.
 
 # Details
 
@@ -126,7 +134,8 @@ The t-statistics file contains the observed mean difference (Group A - Group B) 
 - Visualizing spatial patterns of increases vs. decreases
 - Thresholding by both significance AND magnitude
 
-See `CHANGELOG.md` section on "T-Statistic Output" for complete documentation.
+See the archived `CHANGELOG.md` section on "T-Statistic Output" for complete
+documentation.
 
 ## Incremental Saving and Resume Capability
 
@@ -152,12 +161,14 @@ The CUDA implementation features:
 
 To start fresh and ignore existing results, simply delete the output file before running.
 
-For full documentation, see `CHANGELOG.md` which consolidates all changes, features, and bug fixes in a single comprehensive document.
+For full documentation, see the archived `CHANGELOG.md`, which consolidates
+all changes, features, and bug fixes in a single comprehensive document.
 
 ## Documentation
 
 - **`README.md`** (this file) - Main usage guide and quick reference
-- **`CHANGELOG.md`** - Complete version history, bug fixes, and feature documentation
+- **Archived `CHANGELOG.md`** - Complete legacy version history, bug fixes,
+  and feature documentation
 - **`TEST_RUN_RESULTS.md`** - Validation test results for the March 2026 bug fix
 
 ## Quick Usage Reference
@@ -201,4 +212,104 @@ Major improvements:
 - ✅ Incremental saving with automatic resume (v3.0)
 - ✅ Fixed integer overflow for large datasets (v2.0, January 2026)
 
-See `CHANGELOG.md` for complete version history and migration guide.
+See the archived `CHANGELOG.md` for complete version history and migration
+guidance for the legacy edgewise implementation.
+
+## Experimental bundle-level FWER path
+
+Bundle inference is implemented as a separate path so that the established
+edgewise executables and the existing COFFEE-DAC pipelines remain unchanged:
+
+- `permutationTest_cuda_bundle.cu` computes Welch t-statistics and writes only
+  edges passing either a fixed two-sided t threshold or a two-sided p threshold
+  converted using each edge's Welch-Satterthwaite degrees of freedom.
+- `bundle_fwer.py` applies the existing spatial filtering, strict bundling, and
+  pruning stages and remains the readable Python regression oracle.
+- `bundle_fwer_omp.cpp` implements the same deterministic stages using compact
+  voxel-index edges, spatial hashing, union-find, and OpenMP across independent
+  permutation files. It is the default production bundle engine.
+- `run_bundle_fwer.py` drives row 0 (observed) plus all requested null rows,
+  saves a resumable maximum-statistic distribution, and assigns bundle-level
+  FWER p-values with `(1 + null exceedances) / (B + 1)`.
+
+Build the independent backend with:
+
+```bash
+cmake -S 02_cudaPerm -B 02_cudaPerm/build
+cmake --build 02_cudaPerm/build \
+  --target permutationTest_cuda_bundle bundle_fwer_omp -j2
+```
+
+Example using all null rows in an existing permutation file:
+
+```bash
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py \
+  /path/to/subject_filelist.txt \
+  /path/to/permutations.txt \
+  /path/to/bundle_fwer_results \
+  --mask templates/mask3mm.dump \
+  --threshold 3.9 \
+  --statistic mass \
+  --neighbor-dist 1 \
+  --min-size 10 \
+  --min-cluster-voxels 6 \
+  --batch-size 201 \
+  --bundle-engine cpp \
+  --bundle-threads 4
+```
+
+For production df-aware thresholding, replace `--threshold 3.9` with:
+
+```bash
+  --cluster-forming-p 0.001
+```
+
+This computes Welch's degrees of freedom independently for every edge in the
+observed grouping and every permutation, then retains `|t| >= tcrit(df)` for
+the requested two-sided uncorrected p threshold. Bundle mass is correspondingly
+`sum(|t| - tcrit(df))`; the v2 sparse format stores this per-edge excess. The
+older fixed-threshold mode and v1 sparse files remain supported for regression
+and benchmark reproduction.
+
+The cluster-forming rule must be chosen before examining the bundle-FWER
+result. Positive and negative effects are bundled separately and their maxima
+are combined into one two-sided null distribution. The defaults reproduce the
+current strict bundle parameters.
+
+Every permutation still needs a complete edge scan and bundle pass. Larger
+`--batch-size` values reuse each loaded connectivity chunk across more
+permutations but create more temporary sparse output at once. The C++ engine
+processes permutation files concurrently; `--bundle-threads` bounds that
+concurrency and its peak memory. Use `--bundle-engine python` only for oracle
+comparisons. Interrupted completed batches can be continued with `--resume`;
+sparse files are deleted after their batch is safely summarized unless
+`--keep-sparse` is specified.
+
+Regression checks:
+
+```bash
+.venv/bin/python -m unittest 02_cudaPerm/regression_bundle_fwer.py
+.venv/bin/python -m unittest 02_cudaPerm/regression_bundle_fwer_cpp.py
+.venv/bin/python -m unittest 02_cudaPerm/regression_cuda_bundle.py
+```
+
+The final check uses a tiny synthetic CUDA fixture and is skipped when a GPU
+or the newly built backend is unavailable.
+
+### Optimization benchmark
+
+On the 37-subject LTLE/RTLE subject-mean dataset (59,677 voxels, 1.7806
+billion edges), the identical observed row plus 200 null rows at `|t| >= 3.9`
+gave:
+
+| Bundle engine | Total wall time | Speedup |
+|---|---:|---:|
+| Python oracle | 8:40:42 | 1x |
+| C++/OpenMP (4 workers) | 0:11:48.59 | 44.09x |
+
+All 201 threshold-edge counts, retained-edge counts, bundle counts, observed
+edge assignments, observed bundle labels, and corrected p-values matched.
+Maximum-statistic differences from floating-point summation order were at most
+`3.97e-4` and did not change any corrected p-value. Peak process memory was
+about 36.7 GiB in the optimized run and was dominated by the unchanged CUDA
+input chunk.
