@@ -33,7 +33,9 @@
 #define BUNDLE_SPARSE_MAGIC 0x4C444E42u  /* "BNDL" little-endian */
 #define BUNDLE_SPARSE_VERSION_FIXED 1u
 #define BUNDLE_SPARSE_VERSION_DF_AWARE 2u
+#define BUNDLE_SPARSE_VERSION_DF_STORED 3u
 #define BUNDLE_SPARSE_FLAG_DF_AWARE 1u
+#define BUNDLE_SPARSE_FLAG_DF_STORED 2u
 #define T_LOOKUP_STEPS_PER_DF 4096u
 
 
@@ -59,12 +61,19 @@ typedef struct {
     float tstat;
     float excess;
 } BundleSparseRecordV2;
+
+typedef struct {
+    uint64_t edge_index;
+    float tstat;
+    float degrees_of_freedom;
+} BundleSparseRecordV3;
 #pragma pack(pop)
 
 
 static_assert(sizeof(BundleSparseHeader) == 48, "unexpected sparse header size");
 static_assert(sizeof(BundleSparseRecordV1) == 12, "unexpected v1 sparse record size");
 static_assert(sizeof(BundleSparseRecordV2) == 16, "unexpected v2 sparse record size");
+static_assert(sizeof(BundleSparseRecordV3) == 16, "unexpected v3 sparse record size");
 
 
 static void cuda_check(cudaError_t error, const char *operation)
@@ -160,7 +169,8 @@ __global__ static void threshold_permutation(
     uint64_t capacity,
     uint64_t *output_indices,
     float *output_tstats,
-    float *output_excess,
+    float *output_auxiliary,
+    int store_df,
     unsigned long long *output_count,
     int *overflow)
 {
@@ -182,7 +192,8 @@ __global__ static void threshold_permutation(
     if (position < capacity) {
         output_indices[position] = global_edge_start + edge;
         output_tstats[position] = welch.tstat;
-        output_excess[position] = excess;
+        output_auxiliary[position] = store_df
+            ? welch.degrees_of_freedom : excess;
     } else {
         atomicExch(overflow, 1);
     }
@@ -196,18 +207,21 @@ static void write_header(
     uint64_t n_voxels,
     uint64_t n_total_edges,
     float cluster_forming_value,
-    bool df_aware)
+    bool df_aware,
+    bool store_df)
 {
     BundleSparseHeader header = {
         BUNDLE_SPARSE_MAGIC,
-        df_aware ? BUNDLE_SPARSE_VERSION_DF_AWARE
-                 : BUNDLE_SPARSE_VERSION_FIXED,
+        store_df ? BUNDLE_SPARSE_VERSION_DF_STORED
+                 : (df_aware ? BUNDLE_SPARSE_VERSION_DF_AWARE
+                             : BUNDLE_SPARSE_VERSION_FIXED),
         permutation_index,
         n_records,
         n_voxels,
         n_total_edges,
         cluster_forming_value,
-        df_aware ? BUNDLE_SPARSE_FLAG_DF_AWARE : 0u,
+        (df_aware ? BUNDLE_SPARSE_FLAG_DF_AWARE : 0u)
+            | (store_df ? BUNDLE_SPARSE_FLAG_DF_STORED : 0u),
     };
     if (fseek(stream, 0, SEEK_SET) != 0 ||
             fwrite(&header, sizeof(header), 1, stream) != 1) {
@@ -279,7 +293,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
             "Usage: %s <filelist> <permutations> <output_prefix> <|t| threshold> "
             "[--cluster-forming-p P] [--start-perm N] [--count N] "
-            "[--capacity N]\n"
+            "[--capacity N] [--store-df]\n"
             "Use threshold 0 with --cluster-forming-p for df-aware Welch t.\n",
             argv[0]);
         return EXIT_FAILURE;
@@ -291,6 +305,7 @@ int main(int argc, char **argv)
     float threshold = strtof(argv[4], NULL);
     float cluster_forming_p = 0.f;
     bool df_aware = false;
+    bool store_df = false;
     size_t start_permutation = 0;
     size_t requested_count = 1;
     size_t capacity = 10000000;
@@ -306,6 +321,8 @@ int main(int argc, char **argv)
             requested_count = parse_size(argv[++arg], "--count");
         } else if (strcmp(argv[arg], "--capacity") == 0 && arg + 1 < argc) {
             capacity = parse_size(argv[++arg], "--capacity");
+        } else if (strcmp(argv[arg], "--store-df") == 0) {
+            store_df = true;
         } else {
             fprintf(stderr, "Unknown or incomplete option: %s\n", argv[arg]);
             return EXIT_FAILURE;
@@ -319,6 +336,10 @@ int main(int argc, char **argv)
         }
     } else if (!(threshold > 0.f) || !isfinite(threshold)) {
         fprintf(stderr, "The cluster-forming |t| threshold must be finite and > 0.\n");
+        return EXIT_FAILURE;
+    }
+    if (store_df && !df_aware) {
+        fprintf(stderr, "--store-df requires --cluster-forming-p.\n");
         return EXIT_FAILURE;
     }
     if (requested_count == 0 || capacity == 0) {
@@ -353,6 +374,8 @@ int main(int argc, char **argv)
     else
         printf("  |t| threshold  : %.6f\n", threshold);
     printf("  capacity/part  : %zu sparse edges\n", capacity);
+    if (store_df)
+        printf("  sparse payload : t-statistic + Welch df (threshold-grid mode)\n");
     printf("========================================\n");
     fflush(stdout);
 
@@ -443,7 +466,8 @@ int main(int argc, char **argv)
         }
         write_header(output_streams[local], permutation_index, 0,
                      n_voxels, n_total_edges,
-                     df_aware ? cluster_forming_p : threshold, df_aware);
+                     df_aware ? cluster_forming_p : threshold,
+                     df_aware, store_df);
         if (fseek(output_streams[local], 0, SEEK_END) != 0) {
             perror("seeking sparse output");
             return EXIT_FAILURE;
@@ -506,6 +530,7 @@ int main(int argc, char **argv)
                 device_indices,
                 device_tstats,
                 device_excess,
+                store_df ? 1 : 0,
                 device_count,
                 device_overflow);
             cuda_check(cudaGetLastError(), "launching threshold kernel");
@@ -532,7 +557,7 @@ int main(int argc, char **argv)
 
             std::vector<uint64_t> host_indices((size_t)selected);
             std::vector<float> host_tstats((size_t)selected);
-            std::vector<float> host_excess((size_t)selected);
+            std::vector<float> host_auxiliary((size_t)selected);
             cuda_check(cudaMemcpy(host_indices.data(), device_indices,
                                   selected * sizeof(uint64_t),
                                   cudaMemcpyDeviceToHost),
@@ -542,18 +567,31 @@ int main(int argc, char **argv)
                                   cudaMemcpyDeviceToHost),
                        "downloading sparse t-statistics");
             if (df_aware) {
-                cuda_check(cudaMemcpy(host_excess.data(), device_excess,
+                cuda_check(cudaMemcpy(host_auxiliary.data(), device_excess,
                                       selected * sizeof(float),
                                       cudaMemcpyDeviceToHost),
-                           "downloading sparse threshold excess");
+                           store_df ? "downloading Welch degrees of freedom"
+                                    : "downloading sparse threshold excess");
             }
 
-            if (df_aware) {
+            if (store_df) {
+                std::vector<BundleSparseRecordV3> records((size_t)selected);
+                for (size_t index = 0; index < (size_t)selected; ++index) {
+                    records[index].edge_index = host_indices[index];
+                    records[index].tstat = host_tstats[index];
+                    records[index].degrees_of_freedom = host_auxiliary[index];
+                }
+                if (fwrite(records.data(), sizeof(BundleSparseRecordV3),
+                           records.size(), output_streams[local]) != records.size()) {
+                    perror("writing df-stored sparse records");
+                    return EXIT_FAILURE;
+                }
+            } else if (df_aware) {
                 std::vector<BundleSparseRecordV2> records((size_t)selected);
                 for (size_t index = 0; index < (size_t)selected; ++index) {
                     records[index].edge_index = host_indices[index];
                     records[index].tstat = host_tstats[index];
-                    records[index].excess = host_excess[index];
+                    records[index].excess = host_auxiliary[index];
                 }
                 if (fwrite(records.data(), sizeof(BundleSparseRecordV2),
                            records.size(), output_streams[local]) != records.size()) {
@@ -583,7 +621,8 @@ int main(int argc, char **argv)
         size_t permutation_index = start_permutation + local;
         write_header(output_streams[local], permutation_index,
                      record_counts[local], n_voxels, n_total_edges,
-                     df_aware ? cluster_forming_p : threshold, df_aware);
+                     df_aware ? cluster_forming_p : threshold,
+                     df_aware, store_df);
         fclose(output_streams[local]);
         printf("[permutation %zu] wrote %llu sparse edges to %s\n",
                permutation_index,

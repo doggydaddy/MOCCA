@@ -40,3 +40,11 @@ add_executable(bundle_fwer_omp bundle_fwer_omp.cpp)
 target_compile_features(bundle_fwer_omp PRIVATE cxx_std_17)
 target_compile_options(bundle_fwer_omp PRIVATE -O3 -fopenmp)
 target_link_libraries(bundle_fwer_omp PRIVATE gomp)
+
+# Non-chaining endpoint-patch bundler. It shares the validated sparse reader
+# and pruning code but defaults to bounded-radius representative bundles.
+add_executable(bundle_fwer_bounded_omp bundle_fwer_omp.cpp)
+target_compile_features(bundle_fwer_bounded_omp PRIVATE cxx_std_17)
+target_compile_definitions(bundle_fwer_bounded_omp PRIVATE DEFAULT_BOUNDED_BUNDLES=1)
+target_compile_options(bundle_fwer_bounded_omp PRIVATE -O3 -fopenmp)
+target_link_libraries(bundle_fwer_bounded_omp PRIVATE gomp)

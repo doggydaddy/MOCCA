@@ -33,14 +33,18 @@
 #include <utility>
 #include <vector>
 
+#include <boost/math/distributions/students_t.hpp>
 #include <omp.h>
 
 
 static constexpr uint32_t SPARSE_MAGIC = 0x4C444E42u; /* "BNDL" */
 static constexpr uint32_t SPARSE_VERSION_FIXED = 1u;
 static constexpr uint32_t SPARSE_VERSION_DF_AWARE = 2u;
+static constexpr uint32_t SPARSE_VERSION_DF_STORED = 3u;
 static constexpr uint32_t SPARSE_FLAG_DF_AWARE = 1u;
+static constexpr uint32_t SPARSE_FLAG_DF_STORED = 2u;
 static constexpr uint32_t NONE = std::numeric_limits<uint32_t>::max();
+static constexpr uint32_t T_LOOKUP_STEPS_PER_DF = 4096u;
 
 
 #pragma pack(push, 1)
@@ -65,17 +69,24 @@ struct SparseRecordV2 {
     float tstat;
     float excess;
 };
+
+struct SparseRecordV3 {
+    uint64_t edge_index;
+    float tstat;
+    float degrees_of_freedom;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(SparseHeader) == 48, "unexpected sparse header size");
 static_assert(sizeof(SparseRecordV1) == 12, "unexpected v1 sparse record size");
 static_assert(sizeof(SparseRecordV2) == 16, "unexpected v2 sparse record size");
+static_assert(sizeof(SparseRecordV3) == 16, "unexpected v3 sparse record size");
 
 
 struct SparseRecord {
     uint64_t edge_index;
     float tstat;
-    float excess;
+    float auxiliary;
 };
 
 
@@ -108,6 +119,7 @@ struct CoordHash {
 struct MaskGeometry {
     std::vector<Coord> coordinates;
     std::vector<std::vector<uint32_t>> neighbours;
+    int neighbour_radius = 0;
 };
 
 
@@ -208,6 +220,38 @@ static double parse_double(const char *text, const char *name)
 }
 
 
+static std::vector<double> critical_t_lookup(size_t n_subjects,
+                                             double two_sided_p)
+{
+    if (n_subjects < 4)
+        throw std::runtime_error("Welch testing requires at least four subjects");
+    uint32_t maximum_df = static_cast<uint32_t>(n_subjects) - 2u;
+    size_t count = static_cast<size_t>(maximum_df - 1u)
+        * T_LOOKUP_STEPS_PER_DF + 1u;
+    std::vector<double> lookup(count);
+    for (size_t index = 0; index < count; ++index) {
+        double df = 1.0 + static_cast<double>(index) / T_LOOKUP_STEPS_PER_DF;
+        boost::math::students_t_distribution<double> distribution(df);
+        lookup[index] = boost::math::quantile(
+            boost::math::complement(distribution, two_sided_p / 2.0));
+    }
+    return lookup;
+}
+
+
+static double interpolated_critical_t(double degrees_of_freedom,
+                                      const std::vector<double> &lookup)
+{
+    double position = (degrees_of_freedom - 1.0) * T_LOOKUP_STEPS_PER_DF;
+    position = std::min(std::max(position, 0.0),
+                        static_cast<double>(lookup.size() - 1));
+    size_t lower = static_cast<size_t>(std::floor(position));
+    size_t upper = std::min(lower + 1, lookup.size() - 1);
+    double fraction = position - static_cast<double>(lower);
+    return lookup[lower] + fraction * (lookup[upper] - lookup[lower]);
+}
+
+
 static std::string sparse_path(const std::string &prefix, uint64_t permutation)
 {
     std::ostringstream stream;
@@ -249,6 +293,7 @@ static MaskGeometry load_mask(const std::string &path, double neighbour_dist)
     }
 
     int distance = static_cast<int>(std::ceil(neighbour_dist));
+    mask.neighbour_radius = distance;
     mask.neighbours.resize(mask.coordinates.size());
     #pragma omp parallel for schedule(static)
     for (int64_t index = 0;
@@ -309,11 +354,15 @@ static std::pair<SparseHeader, std::vector<SparseRecord>> read_sparse(
     stream.read(reinterpret_cast<char *>(&header), sizeof(header));
     if (!stream || header.magic != SPARSE_MAGIC
             || (header.version != SPARSE_VERSION_FIXED
-                && header.version != SPARSE_VERSION_DF_AWARE))
+                && header.version != SPARSE_VERSION_DF_AWARE
+                && header.version != SPARSE_VERSION_DF_STORED))
         throw std::runtime_error("invalid sparse header: " + path);
-    if ((header.version == SPARSE_VERSION_DF_AWARE)
+    if ((header.version != SPARSE_VERSION_FIXED)
             != ((header.reserved & SPARSE_FLAG_DF_AWARE) != 0))
         throw std::runtime_error("inconsistent sparse threshold mode: " + path);
+    if ((header.version == SPARSE_VERSION_DF_STORED)
+            != ((header.reserved & SPARSE_FLAG_DF_STORED) != 0))
+        throw std::runtime_error("inconsistent sparse df-storage mode: " + path);
     if (header.n_records > static_cast<uint64_t>(
             std::numeric_limits<size_t>::max() / sizeof(SparseRecordV2)))
         throw std::runtime_error("sparse record count is too large");
@@ -334,7 +383,7 @@ static std::pair<SparseHeader, std::vector<SparseRecord>> read_sparse(
                     0.f,
                 };
             }
-        } else {
+        } else if (header.version == SPARSE_VERSION_DF_AWARE) {
             std::vector<SparseRecordV2> raw(records.size());
             stream.read(reinterpret_cast<char *>(raw.data()),
                         static_cast<std::streamsize>(raw.size()
@@ -344,6 +393,18 @@ static std::pair<SparseHeader, std::vector<SparseRecord>> read_sparse(
             for (size_t index = 0; index < records.size(); ++index)
                 records[index] = {
                     raw[index].edge_index, raw[index].tstat, raw[index].excess,
+                };
+        } else {
+            std::vector<SparseRecordV3> raw(records.size());
+            stream.read(reinterpret_cast<char *>(raw.data()),
+                        static_cast<std::streamsize>(raw.size()
+                            * sizeof(SparseRecordV3)));
+            if (!stream)
+                throw std::runtime_error("truncated v3 sparse records: " + path);
+            for (size_t index = 0; index < records.size(); ++index)
+                records[index] = {
+                    raw[index].edge_index, raw[index].tstat,
+                    raw[index].degrees_of_freedom,
                 };
         }
     }
@@ -360,9 +421,12 @@ static std::pair<SparseHeader, std::vector<SparseRecord>> read_sparse(
             throw std::runtime_error("out-of-range sparse edge index: " + path);
         if (!std::isfinite(records[index].tstat))
             throw std::runtime_error("non-finite sparse t-statistic: " + path);
-        if (!std::isfinite(records[index].excess)
-                || records[index].excess < -1e-5f)
-            throw std::runtime_error("invalid sparse threshold excess: " + path);
+        if (!std::isfinite(records[index].auxiliary)
+                || (header.version == SPARSE_VERSION_DF_AWARE
+                    && records[index].auxiliary < -1e-5f)
+                || (header.version == SPARSE_VERSION_DF_STORED
+                    && records[index].auxiliary < 1.f))
+            throw std::runtime_error("invalid sparse auxiliary value: " + path);
         if (index && records[index - 1].edge_index
                 == records[index].edge_index)
             throw std::runtime_error("duplicate sparse edge index: " + path);
@@ -493,6 +557,83 @@ static uint32_t assign_strict_labels(std::vector<Edge> &edges,
             root_label[root] = n_labels++;
         edges[index].label = root_label[root];
     }
+    return n_labels;
+}
+
+
+static bool within_radius(uint32_t first, uint32_t second,
+                          const MaskGeometry &mask)
+{
+    const Coord &a = mask.coordinates[first];
+    const Coord &b = mask.coordinates[second];
+    int radius = mask.neighbour_radius;
+    return std::abs(a.x - b.x) <= radius
+        && std::abs(a.y - b.y) <= radius
+        && std::abs(a.z - b.z) <= radius;
+}
+
+
+/*
+ * Non-chaining, orientation-invariant endpoint-patch bundling.
+ *
+ * The strongest unassigned edge is a representative connection. Every edge
+ * assigned to it must be orientable so that one endpoint lies within the
+ * configured radius of representative endpoint A and its other endpoint lies
+ * within that radius of representative endpoint B. Thus each endpoint patch
+ * has a hard Chebyshev diameter <= 2 * radius; no transitive path can expand a
+ * bundle beyond that envelope. Ties are broken by the stable sparse edge
+ * order, which is the condensed edge index order.
+ */
+static uint32_t assign_bounded_labels(std::vector<Edge> &edges,
+                                      const MaskGeometry &mask,
+                                      const Incidence &incidence)
+{
+    if (edges.empty())
+        return 0;
+    std::vector<uint32_t> priority(edges.size());
+    std::iota(priority.begin(), priority.end(), 0u);
+    std::stable_sort(priority.begin(), priority.end(),
+        [&edges](uint32_t first, uint32_t second) {
+            if (edges[first].excess != edges[second].excess)
+                return edges[first].excess > edges[second].excess;
+            return first < second;
+        });
+
+    std::vector<uint32_t> labels(edges.size(), NONE);
+    std::vector<uint32_t> seen(edges.size(), NONE);
+    uint32_t n_labels = 0;
+    for (uint32_t seed_index : priority) {
+        if (labels[seed_index] != NONE)
+            continue;
+        const Edge &seed = edges[seed_index];
+        uint32_t stamp = n_labels;
+        labels[seed_index] = n_labels;
+
+        for (uint32_t nearby : mask.neighbours[seed.endpoint1]) {
+            for (uint64_t position = incidence.offsets[nearby];
+                 position < incidence.offsets[nearby + 1]; ++position) {
+                uint32_t candidate_index = incidence.edge_indices[position];
+                if (labels[candidate_index] != NONE
+                        || seen[candidate_index] == stamp)
+                    continue;
+                seen[candidate_index] = stamp;
+                const Edge &candidate = edges[candidate_index];
+                bool direct = within_radius(candidate.endpoint1,
+                                            seed.endpoint1, mask)
+                    && within_radius(candidate.endpoint2,
+                                     seed.endpoint2, mask);
+                bool swapped = within_radius(candidate.endpoint2,
+                                             seed.endpoint1, mask)
+                    && within_radius(candidate.endpoint1,
+                                     seed.endpoint2, mask);
+                if (direct || swapped)
+                    labels[candidate_index] = n_labels;
+            }
+        }
+        ++n_labels;
+    }
+    for (uint32_t index = 0; index < edges.size(); ++index)
+        edges[index].label = labels[index];
     return n_labels;
 }
 
@@ -672,13 +813,17 @@ static std::vector<Edge> prune_small_endpoint_clusters(
 static std::vector<Edge> process_sign(std::vector<Edge> edges,
                                       const MaskGeometry &mask,
                                       size_t minimum_size,
-                                      size_t minimum_cluster_voxels)
+                                      size_t minimum_cluster_voxels,
+                                      bool bounded_bundles)
 {
     edges = filter_isolated(edges, mask);
     if (edges.empty())
         return {};
     Incidence incidence = build_incidence(edges, mask.coordinates.size());
-    assign_strict_labels(edges, mask, incidence);
+    if (bounded_bundles)
+        assign_bounded_labels(edges, mask, incidence);
+    else
+        assign_strict_labels(edges, mask, incidence);
     edges = prune_intra_network_isolated(edges, mask);
     edges = filter_small_networks(edges, minimum_size);
     edges = prune_small_endpoint_clusters(
@@ -694,8 +839,11 @@ static PermutationResult process_permutation(
     const std::string &statistic,
     double cluster_forming_threshold,
     bool df_aware,
+    bool records_contain_df,
+    const std::vector<double> &critical_t_values,
     size_t minimum_size,
     size_t minimum_cluster_voxels,
+    bool bounded_bundles,
     bool retain_observed)
 {
     auto sparse = read_sparse(path);
@@ -705,9 +853,11 @@ static PermutationResult process_permutation(
         throw std::runtime_error("mask/sparse voxel count mismatch: " + path);
     if (header.n_total_edges != header.n_voxels * (header.n_voxels - 1) / 2)
         throw std::runtime_error("invalid sparse total-edge count: " + path);
-    if ((header.version == SPARSE_VERSION_DF_AWARE) != df_aware)
+    if ((header.version != SPARSE_VERSION_FIXED) != df_aware)
         throw std::runtime_error("sparse/requested threshold mode mismatch: " + path);
-    if (std::fabs(static_cast<double>(header.threshold)
+    if ((header.version == SPARSE_VERSION_DF_STORED) != records_contain_df)
+        throw std::runtime_error("sparse/requested df-storage mode mismatch: " + path);
+    if (!records_contain_df && std::fabs(static_cast<double>(header.threshold)
             - cluster_forming_threshold)
             > 1e-6 * std::max(1.0, std::fabs(cluster_forming_threshold)))
         throw std::runtime_error("sparse/requested threshold mismatch: " + path);
@@ -718,10 +868,19 @@ static PermutationResult process_permutation(
     negative.reserve(records.size() / 2);
     for (const SparseRecord &record : records) {
         auto endpoints = condensed_pair(record.edge_index, header.n_voxels);
-        double excess = df_aware
-            ? static_cast<double>(record.excess)
+        double edge_critical_t = 0.0;
+        if (records_contain_df) {
+            edge_critical_t = interpolated_critical_t(
+                static_cast<double>(record.auxiliary), critical_t_values);
+        }
+        double excess = records_contain_df
+            ? std::fabs(static_cast<double>(record.tstat)) - edge_critical_t
+            : (df_aware
+                ? static_cast<double>(record.auxiliary)
             : std::fabs(static_cast<double>(record.tstat))
-                - cluster_forming_threshold;
+                - cluster_forming_threshold);
+        if (excess < 0.0)
+            continue;
         Edge edge{
             endpoints.first, endpoints.second, record.tstat, excess, 0,
         };
@@ -732,11 +891,12 @@ static PermutationResult process_permutation(
     }
     records.clear();
     records.shrink_to_fit();
+    uint64_t threshold_edge_count = positive.size() + negative.size();
 
     positive = process_sign(std::move(positive), mask, minimum_size,
-                            minimum_cluster_voxels);
+                            minimum_cluster_voxels, bounded_bundles);
     negative = process_sign(std::move(negative), mask, minimum_size,
-                            minimum_cluster_voxels);
+                            minimum_cluster_voxels, bounded_bundles);
 
     uint32_t positive_bundles = 0;
     for (const Edge &edge : positive)
@@ -764,7 +924,7 @@ static PermutationResult process_permutation(
 
     PermutationResult result;
     result.permutation = header.permutation;
-    result.threshold_edges = header.n_records;
+    result.threshold_edges = threshold_edge_count;
     result.retained_edges = combined.size();
     result.bundles = n_bundles;
     for (uint32_t label = 0; label < n_bundles; ++label) {
@@ -850,7 +1010,9 @@ static void usage(const char *program)
         << " <threshold> <neighbor_dist> <min_size> <min_cluster_voxels>"
         << " <maxima.csv>"
         << " [--threads N] [--observed-edges FILE]"
-        << " [--observed-bundles FILE] [--df-aware] [--delete-inputs]\n";
+        << " [--observed-bundles FILE] [--df-aware]"
+        << " [--records-contain-df --subjects N] [--bounded-bundles]"
+        << " [--strict-bundles] [--delete-inputs]\n";
 }
 
 
@@ -877,6 +1039,13 @@ int main(int argc, char **argv)
         std::string observed_bundles_path;
         bool delete_inputs = false;
         bool df_aware = false;
+        bool records_contain_df = false;
+        size_t n_subjects = 0;
+#ifdef DEFAULT_BOUNDED_BUNDLES
+        bool bounded_bundles = true;
+#else
+        bool bounded_bundles = false;
+#endif
 
         for (int argument = 11; argument < argc; ++argument) {
             if (std::strcmp(argv[argument], "--threads") == 0
@@ -893,6 +1062,15 @@ int main(int argc, char **argv)
                 delete_inputs = true;
             } else if (std::strcmp(argv[argument], "--df-aware") == 0) {
                 df_aware = true;
+            } else if (std::strcmp(argv[argument], "--records-contain-df") == 0) {
+                records_contain_df = true;
+            } else if (std::strcmp(argv[argument], "--subjects") == 0
+                    && argument + 1 < argc) {
+                n_subjects = parse_size(argv[++argument], "subjects");
+            } else if (std::strcmp(argv[argument], "--bounded-bundles") == 0) {
+                bounded_bundles = true;
+            } else if (std::strcmp(argv[argument], "--strict-bundles") == 0) {
+                bounded_bundles = false;
             } else {
                 throw std::runtime_error(
                     std::string("unknown or incomplete option: ")
@@ -908,10 +1086,19 @@ int main(int argc, char **argv)
             throw std::runtime_error("neighbor_dist must be non-negative");
         if (cluster_forming_threshold < 0)
             throw std::runtime_error("threshold must be non-negative");
+        if (records_contain_df && !df_aware)
+            throw std::runtime_error("--records-contain-df requires --df-aware");
+        if (records_contain_df && n_subjects < 4)
+            throw std::runtime_error(
+                "--records-contain-df requires --subjects >= 4");
 
         omp_set_dynamic(0);
         omp_set_num_threads(threads);
         MaskGeometry mask = load_mask(mask_path, neighbour_dist);
+        std::vector<double> critical_t_values;
+        if (records_contain_df)
+            critical_t_values = critical_t_lookup(
+                n_subjects, cluster_forming_threshold);
         std::vector<PermutationResult> results(count);
         std::vector<std::string> paths(count);
         for (size_t local = 0; local < count; ++local)
@@ -929,8 +1116,10 @@ int main(int argc, char **argv)
                 results[static_cast<size_t>(local)] = process_permutation(
                     paths[static_cast<size_t>(local)], mask, statistic,
                     cluster_forming_threshold,
-                    df_aware,
-                    minimum_size, minimum_cluster_voxels, observed);
+                    df_aware, records_contain_df,
+                    critical_t_values,
+                    minimum_size, minimum_cluster_voxels,
+                    bounded_bundles, observed);
                 if (results[static_cast<size_t>(local)].permutation
                         != permutation)
                     throw std::runtime_error("sparse permutation index mismatch");

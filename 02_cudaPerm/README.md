@@ -232,6 +232,68 @@ edgewise executables and the existing COFFEE-DAC pipelines remain unchanged:
   saves a resumable maximum-statistic distribution, and assigns bundle-level
   FWER p-values with `(1 + null exceedances) / (B + 1)`.
 
+### Threshold-grid bundle FWER
+
+The active bundle path can include the choice of cluster-forming threshold in
+the permutation correction. Supply two or more df-aware, two-sided p values:
+
+```bash
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py FILELIST PERMUTATIONS OUTPUT \
+  --cluster-forming-p-grid 0.001 0.0005 0.0002 0.0001 \
+    0.00005 0.00002 0.00001
+```
+
+CUDA runs once at the most liberal threshold and stores each surviving edge's
+t-statistic and Welch degrees of freedom. The C++ engine then reuses that
+sparse payload at every stricter threshold. For each threshold, bundle mass is
+recomputed from `|t| - t_critical(df, p)`. The maximum bundle mass for every
+permutation is converted to a symmetric permutation-tail rank; the minimum
+rank across thresholds is the per-permutation search statistic. Reported
+`p_grid_fwer` values therefore correct simultaneously for bundles, both signs,
+and selection over the supplied threshold grid.
+
+Grid output includes `permutation_bundle_maxima_grid.csv`, a combined
+`observed_bundles_grid_fwer.csv`, and threshold-specific edge/bundle files
+under `thresholds/p_*/`. The liberal sparse files are deleted batch-wise unless
+`--keep-sparse` is requested.
+
+### Rejected experiment: bounded, non-chaining bundles
+
+> **Status (2026-08-27): not adopted.** The fixed-radius method prevented
+> percolation but imposed visibly artificial 3×3-voxel endpoint patches and
+> generated too many small bundles. The active/default method has therefore
+> reverted to the historical `strict` bundler. The bounded implementation is
+> retained only so its completed experiment remains reproducible.
+
+`--bundle-method bounded` selects the separate
+`bundle_fwer_bounded_omp` executable. This method defines a bundle around its
+strongest unassigned representative edge. A candidate joins only when its
+endpoints can be oriented so that each lies within `neighbor_dist` of the
+corresponding representative endpoint. Consequently, each of the bundle's two
+endpoint patches has a hard Chebyshev diameter no greater than
+`2 * ceil(neighbor_dist)` voxels. Pairwise adjacency cannot chain a bundle
+across the brain.
+
+Seeds are processed by descending threshold excess (`|t| - t_critical`), with
+condensed edge index as the deterministic tie-breaker. An edge fitting several
+representatives is assigned to the strongest representative encountered first.
+This selection is repeated identically for every permutation and is therefore
+included in the permutation null.
+
+Example:
+
+```bash
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py FILELIST PERMUTATIONS OUTPUT \
+  --cluster-forming-p-grid 0.001 0.0005 0.0002 0.0001 \
+    0.00005 0.00002 0.00001 \
+  --bundle-method bounded
+```
+
+The historical `strict` method remains the active default. Despite its name,
+it uses transitive union-find closure and can percolate in dense edge sets.
+Future work will address this by controlling suprathreshold edge density rather
+than imposing the rejected fixed endpoint envelope.
+
 Build the independent backend with:
 
 ```bash

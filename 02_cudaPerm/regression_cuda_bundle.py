@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from run_bundle_fwer import DF_AWARE_VERSION, read_sparse_edges
+from run_bundle_fwer import DF_AWARE_VERSION, DF_STORED_VERSION, read_sparse_edges
 
 
 BACKEND = HERE / "build/permutationTest_cuda_bundle"
@@ -141,6 +141,7 @@ class CudaBundleEndToEndTests(unittest.TestCase):
                     "--batch-size", "2",
                     "--capacity", "100",
                     "--backend", str(BACKEND),
+                    "--bundle-method", "bounded",
                     "--keep-sparse",
                 ],
                 check=True,
@@ -172,6 +173,46 @@ class CudaBundleEndToEndTests(unittest.TestCase):
             self.assertAlmostEqual(
                 observed.loc[0, "mass"], 2 * expected_excess, places=3
             )
+
+            grid_output = temporary / "grid_results"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(HERE / "run_bundle_fwer.py"),
+                    str(filelist),
+                    str(permutations),
+                    str(grid_output),
+                    "--mask", str(mask),
+                    "--cluster-forming-p-grid", "0.001", "0.0001",
+                    "--min-size", "2",
+                    "--min-cluster-voxels", "1",
+                    "--batch-size", "2",
+                    "--capacity", "100",
+                    "--backend", str(BACKEND),
+                    "--keep-sparse",
+                ],
+                check=True,
+            )
+            grid_sparse = grid_output / "sparse_work/bundle_perm000000.bsp"
+            grid_header, grid_records = read_sparse_edges(grid_sparse)
+            self.assertEqual(grid_header["version"], DF_STORED_VERSION)
+            np.testing.assert_allclose(
+                grid_records["degrees_of_freedom"], degrees_of_freedom,
+                rtol=2e-5,
+            )
+            grid_maxima = pd.read_csv(
+                grid_output / "permutation_bundle_maxima_grid.csv"
+            )
+            self.assertEqual(len(grid_maxima), 4)
+            self.assertEqual(
+                sorted(grid_maxima["cluster_forming_p"].unique().tolist()),
+                [0.0001, 0.001],
+            )
+            observed_grid = pd.read_csv(
+                grid_output / "observed_bundles_grid_fwer.csv"
+            )
+            self.assertEqual(len(observed_grid), 2)
+            np.testing.assert_allclose(observed_grid["p_grid_fwer"], 0.5)
 
 
 if __name__ == "__main__":
