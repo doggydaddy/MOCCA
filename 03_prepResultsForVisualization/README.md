@@ -81,5 +81,26 @@ super-critical) thresholds** — see `02_cudaPerm/archives/edgewise_fwer_and_sup
 for why that produces statistically valid but anatomically uninterpretable
 giant "bundles".
 
+## Support figure: percolation calibration curve
+
+`plot_percolation_calibration.py` renders the null-only calibration curve
+from `02_cudaPerm/percolation_calibration.py` (see `02_cudaPerm/README.md`
+and the percolation-calibration memory for the method) as a two-panel
+figure: the voxel-fraction order parameter that gates the sub-critical
+`--cluster-forming-p` choice, and the edge-fraction order parameter kept
+alongside only as a diagnostic (it reverses at the strictest grid points as
+its own denominator collapses, so it is not used for gating). Both panels
+mark the calibrated transition and the recommended (one-grid-step-safer)
+threshold.
+
+```bash
+.venv/bin/python 03_prepResultsForVisualization/plot_percolation_calibration.py \
+  /path/to/percolation_calibration_result_dir /path/to/figure.png \
+  --dataset-label "Controls vs. patients"
+```
+
+`--dataset-label` is required (no dataset is guessed from the path) since
+it only affects the figure title, not the data read.
+
 AFNI support utilities remain in `afni/` because they are not specific to
 either the archived uncorrected-p workflow or the bundle-FWER exports.

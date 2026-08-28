@@ -164,6 +164,33 @@ tmux new-session -d -s <descriptive_name> \
 tmux attach -t <descriptive_name>   # detach: Ctrl-b d
 ```
 
+## Monte Carlo precision of the reported p-values
+
+Every `p_fwer` / `p_threshold_fwer` / `p_grid_fwer` this pipeline reports is
+a permutation-count ratio r/m (m = `null_permutations` + 1 trials including
+the observed row; r = trials at least as extreme as observed) — a binomial
+proportion with its own sampling uncertainty from having run only m
+permutations. `bundle_fwer_precision.py` attaches an exact Clopper-Pearson
+confidence interval to every reported p-value and flags any bundle whose CI
+straddles `--alpha`, i.e. where more permutations could plausibly flip the
+significance call. It recomputes each p-value from the underlying null
+distribution (`null_max_bundle_statistics.npy` / `permutation_bundle_maxima_grid.csv`)
+and raises if that doesn't match the value on disk, rather than trusting the
+CSV's rounded float.
+
+```bash
+.venv/bin/python 02_cudaPerm/bundle_fwer_precision.py \
+  /path/to/bundle_fwer_result_dir --alpha 0.05
+```
+
+Works on both single-threshold and grid output (auto-detected). On the
+controls-vs-patients production run, bundles 94 and 95 (p_fwer = 0.042,
+0.045) both have 95% CIs clear of 0.05 (0.038–0.046 and 0.041–0.049) — 10k
+permutations resolves the call at that alpha. This is a precision check on
+the null distribution sample size, not a power analysis: it says nothing
+about the probability of having missed a real but smaller effect (e.g. the
+LTLE/RTLE null result).
+
 ## Optional: multi-threshold grid FWER
 
 `--cluster-forming-p-grid` remains available for an explicit, declared
