@@ -153,6 +153,8 @@ struct PermutationResult {
     uint64_t retained_edges = 0;
     uint64_t bundles = 0;
     double max_statistic = 0.0;
+    uint64_t largest_bundle_edges = 0;
+    uint64_t largest_bundle_voxels = 0;
     std::vector<Edge> observed_edges;
     std::vector<BundleRow> observed_bundles;
 };
@@ -937,6 +939,24 @@ static PermutationResult process_permutation(
             });
         }
     }
+
+    if (n_bundles > 0) {
+        uint32_t largest_label = static_cast<uint32_t>(
+            std::max_element(counts.begin(), counts.end()) - counts.begin());
+        result.largest_bundle_edges = counts[largest_label];
+        std::vector<uint32_t> voxels;
+        voxels.reserve(counts[largest_label] * 2);
+        for (const Edge &edge : combined) {
+            if (edge.label != largest_label)
+                continue;
+            voxels.push_back(edge.endpoint1);
+            voxels.push_back(edge.endpoint2);
+        }
+        std::sort(voxels.begin(), voxels.end());
+        voxels.erase(std::unique(voxels.begin(), voxels.end()), voxels.end());
+        result.largest_bundle_voxels = voxels.size();
+    }
+
     if (retain_observed)
         result.observed_edges = std::move(combined);
     return result;
@@ -984,6 +1004,28 @@ static void write_observed_edges(const std::string &path,
 }
 
 
+static void write_giant_component_report(
+    const std::string &path,
+    const std::vector<PermutationResult> &results,
+    uint64_t n_voxels)
+{
+    std::ofstream stream(path);
+    if (!stream)
+        throw std::runtime_error("cannot write giant-component report: " + path);
+    stream << "permutation,observed,retained_edges,bundles,"
+              "largest_bundle_edges,largest_bundle_voxels,n_voxels\n";
+    for (const PermutationResult &result : results) {
+        stream << result.permutation << ','
+               << (result.permutation == 0 ? "True" : "False") << ','
+               << result.retained_edges << ',' << result.bundles << ','
+               << result.largest_bundle_edges << ','
+               << result.largest_bundle_voxels << ',' << n_voxels << '\n';
+    }
+    if (!stream)
+        throw std::runtime_error("failed writing giant-component report: " + path);
+}
+
+
 static void write_observed_bundles(const std::string &path,
                                    const PermutationResult &observed)
 {
@@ -1012,7 +1054,8 @@ static void usage(const char *program)
         << " [--threads N] [--observed-edges FILE]"
         << " [--observed-bundles FILE] [--df-aware]"
         << " [--records-contain-df --subjects N] [--bounded-bundles]"
-        << " [--strict-bundles] [--delete-inputs]\n";
+        << " [--strict-bundles] [--delete-inputs]"
+        << " [--giant-component-report FILE]\n";
 }
 
 
@@ -1037,6 +1080,7 @@ int main(int argc, char **argv)
         int threads = std::min(4, omp_get_max_threads());
         std::string observed_edges_path;
         std::string observed_bundles_path;
+        std::string giant_component_report_path;
         bool delete_inputs = false;
         bool df_aware = false;
         bool records_contain_df = false;
@@ -1058,6 +1102,9 @@ int main(int argc, char **argv)
             } else if (std::strcmp(argv[argument], "--observed-bundles") == 0
                     && argument + 1 < argc) {
                 observed_bundles_path = argv[++argument];
+            } else if (std::strcmp(argv[argument], "--giant-component-report") == 0
+                    && argument + 1 < argc) {
+                giant_component_report_path = argv[++argument];
             } else if (std::strcmp(argv[argument], "--delete-inputs") == 0) {
                 delete_inputs = true;
             } else if (std::strcmp(argv[argument], "--df-aware") == 0) {
@@ -1144,6 +1191,9 @@ int main(int argc, char **argv)
             throw std::runtime_error(failure_message);
 
         write_maxima(maxima_path, results);
+        if (!giant_component_report_path.empty())
+            write_giant_component_report(
+                giant_component_report_path, results, mask.coordinates.size());
         if (start == 0) {
             if (!observed_edges_path.empty())
                 write_observed_edges(observed_edges_path, results[0], mask);

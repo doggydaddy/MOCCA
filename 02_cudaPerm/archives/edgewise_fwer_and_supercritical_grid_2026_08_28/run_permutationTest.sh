@@ -24,7 +24,7 @@
 #   --fwer  enable FWER max-statistic correction (two-pass)
 # ============================================================
 
-BINARY=/mnt/islay/MOCCA/02_cudaPerm/build/permutationTest_cuda_fwer
+BINARY=/mnt/islay/MOCCA/02_cudaPerm/archives/edgewise_fwer_and_supercritical_grid_2026_08_28/build/permutationTest_cuda_fwer
 
 # ---- defaults ------------------------------------------------
 SESSION="permTest"

@@ -143,6 +143,12 @@ class MainWindow(QMainWindow):
             is_processed_input_v2,
             load_params_v2,
         )
+        from coffee_dac_pipeline_v3 import (
+            cache_exists_v3,
+            cache_validation_v3,
+            is_processed_input_v3,
+            load_params_v3,
+        )
 
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Edge CSV", "", "CSV Files (*.csv)"
@@ -161,11 +167,25 @@ class MainWindow(QMainWindow):
             )
             return
 
+        if is_processed_input_v3(path):
+            QMessageBox.warning(
+                self,
+                "Processed cache selected",
+                "This is a v3 (divisive) processed cache, not a raw input "
+                "CSV.\n\nSelect the corresponding original CSV instead.",
+            )
+            return
+
         has_v1 = cache_exists(path)
         has_v2 = cache_exists_v2(path)
+        has_v3 = cache_exists_v3(path)
         v2_manifest = load_params_v2(path) if has_v2 else None
         v2_cache_valid, v2_cache_reason = (
             cache_validation_v2(path) if has_v2 else (False, None)
+        )
+        v3_manifest = load_params_v3(path) if has_v3 else None
+        v3_cache_valid, v3_cache_reason = (
+            cache_validation_v3(path) if has_v3 else (False, None)
         )
 
         # --- Build the prompt dialog when any cache exists ---
@@ -173,12 +193,36 @@ class MainWindow(QMainWindow):
         use_cache = False
         recut = None
 
-        if has_v1 or has_v2:
+        if has_v1 or has_v2 or has_v3:
             dialog = QDialog(self)
             dialog.setWindowTitle("Cached results found")
             layout = QVBoxLayout(dialog)
 
             cache_info = []
+            if has_v3:
+                cache_info.append("  • v3 cache (divisive: sub-bundles + edge-level linkage)")
+                if v3_manifest is not None:
+                    params = v3_manifest.get('parameters') or {}
+                    results = v3_manifest.get('results') or {}
+                    cache_info.append(
+                        "    Recorded parameters: "
+                        f"nr-bundles={params.get('nr_bundles', '?')}, "
+                        f"h1-flag={params.get('h1_flag', '?')}, "
+                        f"method={params.get('method', '?')}\n"
+                        "    Result: "
+                        f"{results.get('retained_edges', '?')} edges, "
+                        f"{results.get('bundles', '?')} sub-bundles\n"
+                        "    Completed: "
+                        f"{v3_manifest.get('completed_at', 'unknown')}"
+                    )
+                else:
+                    cache_info.append(
+                        "    Parameter metadata unavailable (legacy cache)"
+                    )
+                if not v3_cache_valid and v3_manifest is not None:
+                    cache_info.append(
+                        f"    Warning: cache validation failed: {v3_cache_reason}"
+                    )
             if has_v2:
                 cache_info.append("  • v2 cache (processed CSV + linkage matrix)")
                 if v2_manifest is not None:
@@ -218,15 +262,21 @@ class MainWindow(QMainWindow):
             ))
 
             combo = QComboBox(dialog)
+            if has_v3:
+                combo.addItem("Load existing v3 results — divisive (fast)", ("v3", True))
             if has_v2:
                 combo.addItem("Load existing v2 results (fast)", ("v2", True))
             if has_v1:
                 combo.addItem("Load existing v1 results (fast)", ("v1", True))
+            combo.addItem("Re-process with pipeline v3 — divisive (slow)", ("v3", False))
             combo.addItem("Re-process with pipeline v2 (slow)", ("v2", False))
             combo.addItem("Re-process with pipeline v1 (slow)", ("v1", False))
             layout.addWidget(combo)
 
-            # Recut spinbox — only relevant when loading v2 cache
+            # Recut spinbox — relevant when loading a v2 (networks) or v3
+            # (sub-bundles) cache. Same underlying "cut the cached tree at a
+            # different size" mechanism in both cases; only the label and
+            # which column gets rewritten differ.
             recut_widget = QWidget(dialog)
             recut_layout = QHBoxLayout(recut_widget)
             recut_layout.setContentsMargins(0, 0, 0, 0)
@@ -245,9 +295,26 @@ class MainWindow(QMainWindow):
             recut_layout.addWidget(recut_spin)
             layout.addWidget(recut_widget)
 
+            recorded_bundles = (
+                (v3_manifest or {}).get('results', {}).get('bundles', 2)
+            )
+            try:
+                recorded_bundles = int(recorded_bundles)
+            except (TypeError, ValueError):
+                recorded_bundles = 2
+
             def update_recut_visibility():
                 choice_pipeline, choice_cache = combo.currentData()
-                recut_widget.setVisible(choice_pipeline == 'v2' and choice_cache)
+                if choice_pipeline == 'v3' and choice_cache:
+                    recut_label.setText("Cut this bundle into N sub-bundles (v3 divisive):")
+                    recut_spin.setValue(max(2, min(50, recorded_bundles)))
+                    recut_widget.setVisible(True)
+                elif choice_pipeline == 'v2' and choice_cache:
+                    recut_label.setText("Cut into N networks (v2 cache only):")
+                    recut_spin.setValue(max(2, min(50, recorded_networks)))
+                    recut_widget.setVisible(True)
+                else:
+                    recut_widget.setVisible(False)
             combo.currentIndexChanged.connect(update_recut_visibility)
             update_recut_visibility()
 
@@ -260,7 +327,7 @@ class MainWindow(QMainWindow):
                 return
 
             pipeline, use_cache = combo.currentData()
-            if pipeline == 'v2' and use_cache:
+            if pipeline in ('v2', 'v3') and use_cache:
                 recut = recut_spin.value()
         else:
             # No cache at all — default to v2 processing
@@ -290,6 +357,11 @@ class MainWindow(QMainWindow):
     def on_data_loaded(self, result):
         self.edges_net = result['edges_net']
         self.linkage_matrix = result.get('linkage_matrix')
+        # v3 (divisive) builds one linkage leaf per EDGE, since it clusters
+        # individual edges directly rather than bundles; v1/v2 build one
+        # leaf per BUNDLE. The dendrogram view needs to know which, since it
+        # can't tell reliably just from array shapes.
+        self.dendrogram_leaves = 'edges' if result.get('pipeline') == 'v3' else 'bundles'
         self.tree_manager.populate(self.edges_net)
         self.plotter.clear()
         self.progress_dialog.close()
@@ -738,6 +810,7 @@ class MainWindow(QMainWindow):
 
         edges_net = self.edges_net
         Z = self.linkage_matrix
+        per_edge_leaves = getattr(self, 'dendrogram_leaves', 'bundles') == 'edges'
 
         # get number of FCNs
         num_fcns = int(np.max(edges_net[:, NETWORK_COL])) + 1
@@ -750,15 +823,17 @@ class MainWindow(QMainWindow):
                 return None
             nth_distance = sorted_distances[n - 1]
             return nth_distance
-        
-        # Pick cut distance based on the current number of FCNs in edges_net.
+
+        # Get unique bundles (for v3 these are sub-bundles of one FWER bundle)
+        unique_bundles = np.unique(edges_net[:, BUNDLE_COL])
+
+        # Pick cut distance based on the current number of FCNs (v1/v2) or
+        # sub-bundles (v3) in edges_net.
         # (Previously hardcoded to 5, which could disagree with current recut.)
-        cut_distance = find_nth_largest_link(Z, num_fcns)
+        num_cuts = len(unique_bundles) if per_edge_leaves else num_fcns
+        cut_distance = find_nth_largest_link(Z, num_cuts)
         if cut_distance is None:
             cut_distance = float(np.max(Z[:, 2])) if Z is not None and len(Z) > 0 else 0.0
-
-        # Get unique bundles
-        unique_bundles = np.unique(edges_net[:, BUNDLE_COL])
 
         # Map bundle → FCN
         bundle_to_fcn = {}
@@ -771,11 +846,29 @@ class MainWindow(QMainWindow):
         # bundle override -> FCN "All" override -> default FCN color
         unique_fcns = sorted(set(bundle_to_fcn.values()))
 
-        # Build labels
-        labels = [
-            f"B{int(b)} (FCN{bundle_to_fcn[int(b)]})"
-            for b in unique_bundles
-        ]
+        truncate_kwargs = {}
+        if per_edge_leaves:
+            # v3: Z has one leaf per EDGE, not per bundle -- label each leaf
+            # by the sub-bundle *that specific edge* was cut into, and
+            # truncate the display (scipy collapses deep subtrees into
+            # count-labeled nodes) since a dataset can have tens of
+            # thousands of edges/leaves, far too many to render individually.
+            bundle_col_values = edges_net[:, BUNDLE_COL].astype(int)
+            fcn_col_values = edges_net[:, NETWORK_COL].astype(int)
+            labels = [
+                f"B{bundle_col_values[i]} (FCN{fcn_col_values[i]})"
+                for i in range(edges_net.shape[0])
+            ]
+            truncate_kwargs = {
+                "truncate_mode": "lastp",
+                "p": max(2 * len(unique_bundles), 10),
+            }
+        else:
+            # v1/v2: Z has one leaf per bundle.
+            labels = [
+                f"B{int(b)} (FCN{bundle_to_fcn[int(b)]})"
+                for b in unique_bundles
+            ]
 
         # Build bundle_to_color → default FCN colors
         bundle_to_color = {}
@@ -827,6 +920,7 @@ class MainWindow(QMainWindow):
             "fcn_to_color": fcn_to_color,
             "bundle_to_color": bundle_to_color,
             "unique_bundles": unique_bundles,
+            "truncate_kwargs": truncate_kwargs,
         }
 
 
@@ -835,12 +929,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Data", "Load data first.")
             return
         prepared_data = self.prepare_dendrogram_plot_data()
+        title = (
+            "Sub-bundle Dendrogram (v3 divisive)"
+            if getattr(self, 'dendrogram_leaves', 'bundles') == 'edges'
+            else "FCN Dendrogram"
+        )
         show_dendrogram(
             Z=self.linkage_matrix,
             labels=prepared_data["labels"],
             cut_distance=prepared_data["cut_distance"],
             fcn_to_color=prepared_data["fcn_to_color"],
             bundle_to_color=prepared_data["bundle_to_color"],
-            title="FCN Dendrogram"
+            title=title,
+            **prepared_data["truncate_kwargs"],
         )
  

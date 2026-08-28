@@ -12,6 +12,12 @@ from coffee_dac_pipeline_v2 import (
     load_cached_result_v2,
     recut_networks,
 )
+from coffee_dac_pipeline_v3 import (
+    process_edge_data_v3,
+    cache_exists_v3,
+    load_cached_result_v3,
+    recut_subbundles,
+)
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -28,30 +34,55 @@ class EdgeDataLoaderWorker(QThread):
     finished = pyqtSignal(object)
 
     def __init__(self, file_path, use_cache=False, pipeline='v1',
-                 v2_kwargs=None, recut=None):
+                 v2_kwargs=None, v3_kwargs=None, recut=None):
         '''
         Parameters
         ----------
         file_path  : str
         use_cache  : bool  – load from the appropriate cache rather than
                              running the full pipeline
-        pipeline   : 'v1' | 'v2'
+        pipeline   : 'v1' | 'v2' | 'v3'
         v2_kwargs  : dict or None  – extra keyword arguments forwarded to
                      process_edge_data_v2 (e.g. top_n, min_network_size …)
-                     Ignored when pipeline='v1' or use_cache=True.
+                     Ignored when pipeline != 'v2' or use_cache=True.
+        v3_kwargs  : dict or None  – extra keyword arguments forwarded to
+                     process_edge_data_v3 (e.g. nr_bundles, h1_flag …)
+                     Ignored when pipeline != 'v3' or use_cache=True.
         recut      : int or None  – if set and pipeline='v2', re-cut the
                      loaded result into this many networks using the cached
-                     linkage matrix (instant, no reprocessing needed).
+                     linkage matrix (instant, no reprocessing needed). If set
+                     and pipeline='v3', re-cut into this many sub-bundles
+                     instead, same instant mechanism one level down.
         '''
         super().__init__()
         self.file_path   = file_path
         self.use_cache   = use_cache
         self.pipeline    = pipeline
         self.v2_kwargs   = v2_kwargs or {}
+        self.v3_kwargs   = v3_kwargs or {}
         self.recut       = recut
 
     def run(self):
-        if self.pipeline == 'v2':
+        if self.pipeline == 'v3':
+            if self.use_cache:
+                self.progress.emit(10)
+                result = load_cached_result_v3(self.file_path)
+                self.progress.emit(80)
+                if self.recut is not None:
+                    edges_out, nr_out = recut_subbundles(
+                        result['edges_net'], result['linkage_matrix'], self.recut
+                    )
+                    result['edges_net'] = edges_out
+                    result['nr_bundles_out'] = nr_out
+                self.progress.emit(100)
+            else:
+                result = process_edge_data_v3(
+                    self.file_path,
+                    progress_callback=self.progress.emit,
+                    invocation='gui',
+                    **self.v3_kwargs,
+                )
+        elif self.pipeline == 'v2':
             if self.use_cache:
                 self.progress.emit(10)
                 result = load_cached_result_v2(self.file_path)
@@ -81,4 +112,5 @@ class EdgeDataLoaderWorker(QThread):
                     self.file_path,
                     progress_callback=self.progress.emit,
                 )
+        result['pipeline'] = self.pipeline
         self.finished.emit(result)

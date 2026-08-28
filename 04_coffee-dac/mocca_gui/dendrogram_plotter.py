@@ -6,7 +6,9 @@ def show_dendrogram(
     cut_distance,
     fcn_to_color,
     bundle_to_color,
-    title="Dendrogram"
+    title="Dendrogram",
+    truncate_mode=None,
+    p=None,
 ):
     import matplotlib.pyplot as plt
     from scipy.cluster.hierarchy import dendrogram
@@ -75,21 +77,33 @@ def show_dendrogram(
             return next(iter(color_set))
         return "grey"
 
-    dendro = dendrogram(
-        Z,
+    dendro_kwargs = dict(
         labels=labels,
         leaf_rotation=90,
         leaf_font_size=8,
         link_color_func=link_color_func,
         color_threshold=thresh,
-        above_threshold_color="grey"
+        above_threshold_color="grey",
     )
+    if truncate_mode is not None:
+        dendro_kwargs["truncate_mode"] = truncate_mode
+    if p is not None:
+        dendro_kwargs["p"] = p
+    dendro = dendrogram(Z, **dendro_kwargs)
     plt.axhline(y=thresh, c='grey', lw=1, linestyle='dashed')
 
     leaf_order = dendro["leaves"]
 
-    # Reorder leaf colors to plotted order and color x tick labels
-    ordered_leaf_colors = [leaf_hex_colors[idx] for idx in leaf_order]
+    # Reorder leaf colors to plotted order and color x tick labels.
+    # Under truncation (truncate_mode set), scipy's "leaves" can be internal
+    # node ids standing in for a collapsed subtree (id >= n_leaves), not just
+    # original leaf indices -- reuse link_color_func for those, exactly the
+    # same rule already used to color the links themselves, instead of
+    # indexing leaf_hex_colors (which is only valid for id < n_leaves).
+    def leaf_display_color(idx):
+        return leaf_hex_colors[idx] if idx < n_leaves else link_color_func(idx)
+
+    ordered_leaf_colors = [leaf_display_color(idx) for idx in leaf_order]
 
     ax = plt.gca()
     tick_labels = ax.get_xticklabels()

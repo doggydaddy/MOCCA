@@ -16,17 +16,10 @@ if (OPENMP_FOUND)
 endif()
 find_package(CUDA REQUIRED)
 
-add_executable(permutationTest_cuda_fwer
-    permutationTest_cuda_fwer.cu
-    perm_kernels.cu
-    ccmat_io.c
-    results_io.c)
-target_include_directories(permutationTest_cuda_fwer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(permutationTest_cuda_fwer PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-gencode arch=compute_89,code=sm_89 -Xcompiler=-fopenmp>)
-target_link_libraries(permutationTest_cuda_fwer PRIVATE gomp)
-
-# Separate sparse backend for bundle-level permutation FWER.  This does not
-# alter either established permutation executable.
+# Main pipeline: sparse edgewise Welch-stat backend feeding bundle-level FWER
+# (see README.md). The superseded edgewise max-statistic FWER backend
+# (permutationTest_cuda_fwer, perm_kernels, results_io) moved to
+# archives/edgewise_fwer_and_supercritical_grid_2026_08_28/ on 2026-08-28.
 add_executable(permutationTest_cuda_bundle
     permutationTest_cuda_bundle.cu
     ccmat_io.c)

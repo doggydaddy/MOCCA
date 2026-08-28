@@ -1,353 +1,221 @@
-# CUDA accelerated permutation testing
+# CUDA-accelerated bundle-level permutation FWER
 
-> **Archive note (2026-08-26):** The original edgewise, uncorrected-p CUDA and
-> OpenMP executables documented in the historical sections below have moved to
-> `archives/uncorrected_p_pipeline_2026_08_26/`. Their complete changelog,
-> validation script, and test fixtures are preserved there. The active module
-> root now contains the max-statistic and bundle-level FWER implementations.
+> **Archive notes:**
+> - 2026-08-26: the original edgewise, uncorrected-p CUDA/OpenMP executables
+>   (`permutationTest_cuda`, `permutationTest_omp`, `createPerm.py`-style
+>   usage) moved to `archives/uncorrected_p_pipeline_2026_08_26/`.
+> - 2026-08-28: the edgewise **max-statistic FWER** backend
+>   (`permutationTest_cuda_fwer.cu` and its `perm_kernels`/`results_io`
+>   support files) and the pre-calibration seven-point **super-critical
+>   grid** launcher moved to
+>   `archives/edgewise_fwer_and_supercritical_grid_2026_08_28/`. Both were
+>   valid for what they computed but are no longer the recommended path —
+>   see that archive's README for why.
+>
+> Full project narrative, including the reasoning behind every design
+> decision below, is in `conversation_archives_2026-08-26.md` at the repo
+> root.
 
-This subroutines performs connection-wise permutation tests.
+This module performs connection-wise (edgewise) Welch permutation testing
+between two subject groups over an atlas-free voxel-to-voxel connectivity
+graph, and produces **bundle-level, family-wise-error-corrected** results:
+spatially coherent groups of surviving edges, each with a single corrected
+p-value.
 
-The statistical tests are performed independently for each voxel, so the tests
-can be greatly accelerated using GPU.
+## Why bundling happens here, not downstream
 
-## ⚠️ IMPORTANT: Recent Bug Fix (March 2026)
+COFFEE-DAC (module `04_coffee-dac/`) originally formed bundles *after* the
+statistics were computed, from an already-thresholded edge CSV, purely to
+make results legible to a human. Once FWER correction needed to happen at
+the bundle level — not the edge level, correcting the ~1.78 billion
+per-edge tests over an atlas-free graph is hopelessly conservative — bundle
+formation had to move into the permutation loop itself: every one of the
+10,000+ null permutations needs its own bundles built and its own maximum
+bundle statistic recorded, and that has to run at GPU/C++ speed, not be
+re-derived per-permutation in Python. So this module now owns both stages:
 
-A **critical bug** in the p-value calculation was fixed on March 7, 2026. If you have existing results computed before this date, they may be incorrect and should be rerun.
+1. `permutationTest_cuda_bundle.cu` — CUDA backend. Computes the Welch
+   t-statistic and Welch-Satterthwaite degrees of freedom for every edge and
+   permutation, and writes out only the sparse set of edges exceeding a
+   df-aware, two-sided cluster-forming p-value threshold (`--cluster-forming-p`).
+2. `bundle_fwer_omp.cpp` — C++/OpenMP backend. Reads that sparse edge set,
+   forms bundles (spatial isolation filter, strict/transitive bundling,
+   intra-bundle pruning, endpoint-cluster pruning — the same deterministic
+   stages COFFEE-DAC v1/v2 used), computes each bundle's mass statistic, and
+   records the maximum across both signs for every permutation.
+3. `run_bundle_fwer.py` — orchestrates both stages across the observed row
+   and every null permutation, and converts the null distribution of maximum
+   bundle statistics into per-bundle corrected p-values:
+   `p_FWER = (1 + #{null max ≥ observed}) / (B + 1)`.
 
-**What was fixed:**
-- Permutation counting logic was incorrect
-- Two-tailed tests were not working properly
-- Many results showed exact zero p-values incorrectly
+## The catch-22, and how it's resolved
 
-**Action required:** 
-- Rerun analyses performed before March 7, 2026
-- See `archives/uncorrected_p_pipeline_2026_08_26/CHANGELOG.md` for complete
-  details on the archived edgewise implementation.
+Bundling needs a cluster-forming edge threshold (`p_CF`) chosen *before* any
+statistics are corrected — but the historical transitive ("strict") bundler
+is a union-find over voxel adjacency, and like any adjacency graph it has a
+**percolation phase transition**: past some suprathreshold edge density, the
+union-find chains across most of the brain and "the largest bundle" becomes
+a single giant, anatomically meaningless component rather than a localized
+structure. Pick `p_CF` too liberally and you get a statistically valid but
+uninterpretable result (one real run's "significant bundle" covered 8.2
+million edges, 98.7% of all mask voxels); pick it by eye to make the result
+look like a sensible bundle and the whole analysis becomes circular.
 
-## ⚡ Performance (March 29, 2026)
+The fix is **`percolation_calibration.py`**: a cheap, independent calibration
+run (a few hundred null permutations, never the observed grouping) that
+measures where that transition actually sits for *this* dataset's own null
+adjacency geometry, before any real inference is run.
 
-The CUDA kernel has been **completely reworked** to exploit GPU parallelism properly.
-
-**Previous behaviour:** 1 thread per block — each thread processed all permutations sequentially. GPU utilization was < 1%.
-
-**Current behaviour:** 256 threads per block — permutation loop is divided across threads with a shared-memory reduction. GPU utilization is ~95%.
-
-| Dataset | Parts | Before | After |
-|---------|-------|--------|-------|
-| 37 subjects, 1M perms | 185 | ~277 days | ~1.5–2 days |
-| 257 subjects, 1M perms | 1299 | years | ~2–3 days |
-
-See `archives/uncorrected_p_pipeline_2026_08_26/CHANGELOG.md` [v3.2] for the
-full technical details.
-
-# Details
-
-For each test, all N subjects included in the tests must be loaded into memory.
-For easy memory management, prior to performing the tests, the permutations are
-generated *a-priori*.
-
-## Generating permutations
-
-The permutations are generated using a python program *createPerm.py*. It
-generates one-hot labels of $n$ permutations of nA and nB subjects, where $nA$
-and $nB$ is the number of subjects in group A and group B respectively.
-
-Calling the program is simple:
-
-        python createPerm.py <nr. permutations> <nA> <nB> <output txt file>
-
-**Note** that the original statistical test groupings is NOT known to the
-program. So the first row of the generated text file must be replaced with the
-original labels, otherwise the test will not be as intended! The ordering is
-from left-to-right from the top-to-down order of appearance in *filelist.txt*
-
-## Performing permutation tests
-
-### Parsing file list
-
-The file list is a simple list of files to be processed in a single column with
-one file name per row. The order does matter as the intended statistical test
-groupings must be in order of the *first* row in the permutations file. 
-
-For example, the filelist may be initiated using:
-
-        find . -name 'groupA_subj*_connectivityMatrix.txt' | sort > filelist.txt
-        find . -name 'groupB_subj*_connectivityMatrix.txt' | sort >> filelist.txt
-
-The program *parseFileList* parses all subjects in the *filelist* from *start
-index* to *end index*, and outputs it into a separate *output file*.
-
-        parseFileList <filelist> <start index> <end index> <output file>
-
-Each row contains the subject voxel data from start to end index, in order
-left-to-right according to the input file lists top-to-down order.
-
-# Simulated data for testing
-
-The iPython notebook *genTestData.ipynb* can be used to generate simulated data
-for testing purposes. Simulated data with their names can be found and changed
-in *subject_list*. *N* is the number of simulated voxels (not connections).
-*subject_list_A* contains a sub-list, where each subject have certain
-connections artificially truncated to above a threshold (0.8). Otherwise all
-simulated connection values are uniformly random between \[-1,1\].
-
-# Generating permutations
-
-Prior to running permutations tests, a separate routine needs to be called to
-pre-generate permutations to be used for calculations. This is done to reduce
-complexity in the actual calculations program. Simply call the python program
-*createPerm.py* to generate permutations:
-
-                python createPerm.py -nPerm <nP> -nA <X> -nB <Y> -o <output permutations txt file>
-                
-Where *nP* is the number of permutations (e.g 5000), *X* and *Y* are number of
-subjects in group A and group B respectively.
-
-Note that the output is the indices of one of the groups (group A) for each
-permutation, and NOT one-hot labelling of the groups. This is done to save
-space, and permutation calculation routines expects the input to be in this way.
-
-# Running permutation tests
-
-Performing permutation tests can be done simply by calling:
-
-                ./<permutation_test_prog> <file list> <permutation file> <output>
-
-Where *\<permutation_test_prog\>* is either permutationTest_cuda, or
-permutationTest_omp in the build folder (assuming cmake is used to compile the
-project) for GPU and CPU implementations respectively.
-
-For the CUDA implementation, performing the calculations in parts is supported
-when the GPU memory capacity is deemed insufficient to carry out the entire
-calculations in one go. This is **NOT** the case for the CPU/OMP implementation.
-
-## Output Files
-
-The CUDA implementation automatically generates **two output files**:
-
-1. **P-values file**: The filename you specify (e.g., `output.permout`)
-2. **T-statistics file**: Same name with `_tstat` inserted before extension (e.g., `output_tstat.permout`)
-
-The t-statistics file contains the observed mean difference (Group A - Group B) for each connection, which is useful for:
-- Determining effect size and direction
-- Visualizing spatial patterns of increases vs. decreases
-- Thresholding by both significance AND magnitude
-
-See the archived `CHANGELOG.md` section on "T-Statistic Output" for complete
-documentation.
-
-## Incremental Saving and Resume Capability
-
-The CUDA implementation features:
-
-- **Incremental Saving**: Results are saved to disk after each part is completed
-- **Resume on Interruption**: If interrupted, the program automatically detects existing results and resumes from where it left off
-- **Lower Memory Usage**: No need to store all results in RAM
-- **Progress Monitoring**: Partial results available while the program runs
-
-### Resume Example
+- **Order parameter:** the fraction of the mask's voxels touched by the
+  single largest strict bundle (summed across both signs, matching how
+  real inference takes one joint two-sided maximum). This is the
+  giant-voxel-fraction metric devised for this purpose — not the more
+  obvious "largest bundle edges / all retained edges" fraction, which was
+  tried first and rejected: at very strict thresholds so few edges survive
+  that a handful of them land in one component by chance, and edge-fraction
+  spuriously climbs back toward 1.0 even though nothing is actually
+  percolating. Voxel-fraction has a fixed denominator (total mask voxels)
+  regardless of threshold, so it doesn't have this artifact — it falls
+  monotonically all the way down the threshold grid, and it's also the
+  metric that matches the original giant-component symptom directly ("98.7%
+  of voxels touched").
+- **Rule:** sweep a threshold grid purely on the null permutations; find the
+  most liberal `p_CF` where a chosen percentile (default: 95th) of the null
+  giant-voxel-fraction distribution stays at or below a small epsilon
+  (default: 5%). That is the estimated transition. Recommend one grid step
+  stricter as a safety margin against calibration sampling noise near the
+  transition.
+- Because this never looks at the observed bundle statistics, the resulting
+  `p_CF` is a legitimate, pre-registered choice — not something picked
+  because a result looked good.
 
 ```bash
-# Start the job
-./permutationTest_cuda filelist.txt permutations.txt output.permout
-
-# ... program runs, completes 2 of 5 parts, then crashes ...
-
-# Simply run the same command again - it will resume automatically
-./permutationTest_cuda filelist.txt permutations.txt output.permout
-# Output: [RESUME] Resuming from part 3 (already completed 2 parts)
+.venv/bin/python 02_cudaPerm/percolation_calibration.py \
+  FILELIST PERMUTATIONS OUTPUT_DIR \
+  --calibration-permutations 200 \
+  --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
+  --bundle-threads 16
 ```
 
-To start fresh and ignore existing results, simply delete the output file before running.
+Reuses the same CUDA v3 sparse format as real inference: one CUDA pass at
+the most liberal grid threshold, then the C++ bundler re-thresholds the
+cached sparse edges at every stricter grid point for free. Writes
+`percolation_calibration_curve.csv` (per-threshold, per-permutation giant
+fractions), `percolation_calibration_summary.csv` (percentiles per
+threshold), and `percolation_calibration_results.json` (the recommended
+`p_CF`). Each dataset (different subject counts/grouping) needs its own
+calibration run — but empirically the transition has landed at the same
+grid point (`p_CF=1e-5`, recommended operating point `5e-6`) for both
+datasets tried so far, since it's governed more by the fixed spatial mask
+geometry (`neighbor_dist`, voxel count) than by sample size.
 
-For full documentation, see the archived `CHANGELOG.md`, which consolidates
-all changes, features, and bug fixes in a single comprehensive document.
+**Note on batch size:** each CUDA invocation reloads the *entire* subject
+connectivity dataset (tens to hundreds of GB for real datasets) regardless
+of how many permutation rows it's given, so `percolation_calibration.py`
+defaults to one CUDA batch covering every calibration permutation to avoid
+paying that reload cost more than once. `run_bundle_fwer.py`'s default
+`--batch-size 8` is tuned for resumability on very long runs instead —
+raise it explicitly (e.g. `--batch-size 1000`–`2500`) for large production
+runs where disk is not warm/cached, or the reload overhead can dominate
+wall time.
 
-## Documentation
+## Running the real inference
 
-- **`README.md`** (this file) - Main usage guide and quick reference
-- **Archived `CHANGELOG.md`** - Complete legacy version history, bug fixes,
-  and feature documentation
-- **`TEST_RUN_RESULTS.md`** - Validation test results for the March 2026 bug fix
-
-## Quick Usage Reference
-
-### Basic Usage
-
-```bash
-# Generate permutations
-python generatePermutations.py -nPerm 5000 -nA 10 -nB 10 -o perms.txt
-
-# Edit first row of perms.txt to match original data grouping
-
-# Run permutation test (one-tailed)
-./permutationTest_cuda filelist.txt perms.txt output.permout
-
-# Run permutation test (two-tailed)
-./permutationTest_cuda filelist.txt perms.txt output.permout --two-tailed
-```
-
-### Output Files
-
-The program automatically generates two files:
-- `output.permout` - P-values (significance)
-- `output_tstat.permout` - T-statistics (effect size and direction)
-
-### Resume Capability
-
-If interrupted, simply run the same command again - it will automatically resume from where it left off.
-
-## Version Information
-
-**Current Version:** v4.0 (April 5, 2026)
-
-Major improvements:
-- ✅ **Welch's t-statistic replaces raw mean difference** — fixes massively inflated false positive rates (v4.0, April 5, 2026)
-- ✅ **GPU kernel optimization: ~150–270x faster per part** (v3.2, March 29, 2026)
-- ✅ Fixed GPU memory calculation causing NaN t-statistics (v3.1, March 27, 2026)
-- ✅ Fixed critical p-value calculation bug (v3.0)
-- ✅ Added two-tailed test support (`--two-tailed` flag) (v3.0)
-- ✅ Automatic t-statistic output (v3.0)
-- ✅ Incremental saving with automatic resume (v3.0)
-- ✅ Fixed integer overflow for large datasets (v2.0, January 2026)
-
-See the archived `CHANGELOG.md` for complete version history and migration
-guidance for the legacy edgewise implementation.
-
-## Experimental bundle-level FWER path
-
-Bundle inference is implemented as a separate path so that the established
-edgewise executables and the existing COFFEE-DAC pipelines remain unchanged:
-
-- `permutationTest_cuda_bundle.cu` computes Welch t-statistics and writes only
-  edges passing either a fixed two-sided t threshold or a two-sided p threshold
-  converted using each edge's Welch-Satterthwaite degrees of freedom.
-- `bundle_fwer.py` applies the existing spatial filtering, strict bundling, and
-  pruning stages and remains the readable Python regression oracle.
-- `bundle_fwer_omp.cpp` implements the same deterministic stages using compact
-  voxel-index edges, spatial hashing, union-find, and OpenMP across independent
-  permutation files. It is the default production bundle engine.
-- `run_bundle_fwer.py` drives row 0 (observed) plus all requested null rows,
-  saves a resumable maximum-statistic distribution, and assigns bundle-level
-  FWER p-values with `(1 + null exceedances) / (B + 1)`.
-
-### Threshold-grid bundle FWER
-
-The active bundle path can include the choice of cluster-forming threshold in
-the permutation correction. Supply two or more df-aware, two-sided p values:
-
-```bash
-.venv/bin/python 02_cudaPerm/run_bundle_fwer.py FILELIST PERMUTATIONS OUTPUT \
-  --cluster-forming-p-grid 0.001 0.0005 0.0002 0.0001 \
-    0.00005 0.00002 0.00001
-```
-
-CUDA runs once at the most liberal threshold and stores each surviving edge's
-t-statistic and Welch degrees of freedom. The C++ engine then reuses that
-sparse payload at every stricter threshold. For each threshold, bundle mass is
-recomputed from `|t| - t_critical(df, p)`. The maximum bundle mass for every
-permutation is converted to a symmetric permutation-tail rank; the minimum
-rank across thresholds is the per-permutation search statistic. Reported
-`p_grid_fwer` values therefore correct simultaneously for bundles, both signs,
-and selection over the supplied threshold grid.
-
-Grid output includes `permutation_bundle_maxima_grid.csv`, a combined
-`observed_bundles_grid_fwer.csv`, and threshold-specific edge/bundle files
-under `thresholds/p_*/`. The liberal sparse files are deleted batch-wise unless
-`--keep-sparse` is requested.
-
-### Rejected experiment: bounded, non-chaining bundles
-
-> **Status (2026-08-27): not adopted.** The fixed-radius method prevented
-> percolation but imposed visibly artificial 3×3-voxel endpoint patches and
-> generated too many small bundles. The active/default method has therefore
-> reverted to the historical `strict` bundler. The bounded implementation is
-> retained only so its completed experiment remains reproducible.
-
-`--bundle-method bounded` selects the separate
-`bundle_fwer_bounded_omp` executable. This method defines a bundle around its
-strongest unassigned representative edge. A candidate joins only when its
-endpoints can be oriented so that each lies within `neighbor_dist` of the
-corresponding representative endpoint. Consequently, each of the bundle's two
-endpoint patches has a hard Chebyshev diameter no greater than
-`2 * ceil(neighbor_dist)` voxels. Pairwise adjacency cannot chain a bundle
-across the brain.
-
-Seeds are processed by descending threshold excess (`|t| - t_critical`), with
-condensed edge index as the deterministic tie-breaker. An edge fitting several
-representatives is assigned to the strongest representative encountered first.
-This selection is repeated identically for every permutation and is therefore
-included in the permutation null.
-
-Example:
-
-```bash
-.venv/bin/python 02_cudaPerm/run_bundle_fwer.py FILELIST PERMUTATIONS OUTPUT \
-  --cluster-forming-p-grid 0.001 0.0005 0.0002 0.0001 \
-    0.00005 0.00002 0.00001 \
-  --bundle-method bounded
-```
-
-The historical `strict` method remains the active default. Despite its name,
-it uses transitive union-find closure and can percolate in dense edge sets.
-Future work will address this by controlling suprathreshold edge density rather
-than imposing the rejected fixed endpoint envelope.
-
-Build the independent backend with:
-
-```bash
-cmake -S 02_cudaPerm -B 02_cudaPerm/build
-cmake --build 02_cudaPerm/build \
-  --target permutationTest_cuda_bundle bundle_fwer_omp -j2
-```
-
-Example using all null rows in an existing permutation file:
+Once calibration has produced a `p_CF`, run the full permutation count with
+that single, fixed threshold — **not** a multi-threshold grid. A grid's
+`symmetric_permutation_min_p` correction pays a real, measurable power cost
+for searching over candidate thresholds (observed directly: `p_grid_fwer`
+ran ~0.03–0.05 higher than the single-threshold `p_threshold_fwer` at
+matching rows in one real run); once calibration has already chosen a
+threshold via an independent, null-only rule, that search is unneeded and
+only costs power. The `--cluster-forming-p-grid` option described further
+below still exists for genuinely exploratory multi-threshold sensitivity
+analyses, but is not the default recommendation.
 
 ```bash
 .venv/bin/python 02_cudaPerm/run_bundle_fwer.py \
-  /path/to/subject_filelist.txt \
-  /path/to/permutations.txt \
-  /path/to/bundle_fwer_results \
-  --mask templates/mask3mm.dump \
-  --threshold 3.9 \
-  --statistic mass \
-  --neighbor-dist 1 \
-  --min-size 10 \
-  --min-cluster-voxels 6 \
-  --batch-size 201 \
-  --bundle-engine cpp \
-  --bundle-threads 4
+  FILELIST PERMUTATIONS OUTPUT_DIR \
+  --cluster-forming-p 5e-6 \
+  --null-permutations 10000 \
+  --statistic mass --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
+  --bundle-method strict --bundle-engine cpp --bundle-threads 16 \
+  --capacity 20000000 --batch-size 1000
 ```
 
-For production df-aware thresholding, replace `--threshold 3.9` with:
+(`--capacity` bounds sparse edges per CUDA part *per permutation row* — the
+default of 10M was seen to overflow on a dense real permutation; 20M has
+been sufficient for both datasets run so far.)
+
+Produces `observed_bundles_fwer.csv` (every surviving bundle's `edge_count`,
+`mass`, and corrected `p_fwer`) and `observed_edges_bundled.csv` (every
+member edge, for visualization). Hand these to
+`03_prepResultsForVisualization/prepare_bundle_single_fwer.py`.
+
+### Long-running jobs
+
+Launch any multi-hour job (calibration batches over a few hundred
+permutations are usually minutes; full 10k-permutation production runs can
+be hours) in a named `tmux` session with output logged to a file inside the
+output directory, so it can be attached to and monitored independently:
 
 ```bash
-  --cluster-forming-p 0.001
+tmux new-session -d -s <descriptive_name> \
+  "<command> 2>&1 | tee OUTPUT_DIR/run.log"
+tmux attach -t <descriptive_name>   # detach: Ctrl-b d
 ```
 
-This computes Welch's degrees of freedom independently for every edge in the
-observed grouping and every permutation, then retains `|t| >= tcrit(df)` for
-the requested two-sided uncorrected p threshold. Bundle mass is correspondingly
-`sum(|t| - tcrit(df))`; the v2 sparse format stores this per-edge excess. The
-older fixed-threshold mode and v1 sparse files remain supported for regression
-and benchmark reproduction.
+## Optional: multi-threshold grid FWER
 
-The cluster-forming rule must be chosen before examining the bundle-FWER
-result. Positive and negative effects are bundled separately and their maxima
-are combined into one two-sided null distribution. The defaults reproduce the
-current strict bundle parameters.
+`--cluster-forming-p-grid` remains available for an explicit, declared
+sensitivity analysis over several thresholds that have *all* already been
+confirmed sub-critical by calibration (e.g. `1e-5 5e-6 2e-6 1e-6`). CUDA
+runs once at the most liberal grid threshold and stores each surviving
+edge's t-statistic and Welch degrees of freedom (`--store-df`, sparse format
+v3); the C++ engine reuses that payload at every stricter threshold,
+recomputing bundle mass from `|t| - t_critical(df, p)` each time. The
+maximum bundle mass per permutation, across all grid points and both signs,
+becomes a symmetric permutation-tail rank; the minimum rank across
+thresholds is the per-permutation search statistic, so reported
+`p_grid_fwer` corrects simultaneously for bundle selection, both signs, and
+the threshold search itself.
 
-Every permutation still needs a complete edge scan and bundle pass. Larger
-`--batch-size` values reuse each loaded connectivity chunk across more
-permutations but create more temporary sparse output at once. The C++ engine
-processes permutation files concurrently; `--bundle-threads` bounds that
-concurrency and its peak memory. Use `--bundle-engine python` only for oracle
-comparisons. Interrupted completed batches can be continued with `--resume`;
-sparse files are deleted after their batch is safely summarized unless
-`--keep-sparse` is specified.
+```bash
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py FILELIST PERMUTATIONS OUTPUT \
+  --cluster-forming-p-grid 1e-5 5e-6 2e-6 1e-6 \
+  --null-permutations 10000 \
+  --statistic mass --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
+  --bundle-method strict --bundle-engine cpp --bundle-threads 16
+```
 
-Regression checks:
+Grid output includes `permutation_bundle_maxima_grid.csv`, a combined
+`observed_bundles_grid_fwer.csv`, and threshold-specific edge/bundle files
+under `thresholds/p_*/`. Hand these to
+`03_prepResultsForVisualization/prepare_bundle_grid_fwer.py` instead of the
+single-threshold export script. **Never run this over a grid spanning
+uncalibrated (potentially super-critical) thresholds** — see the archived
+seven-point grid for why that produces statistically valid but
+uninterpretable giant components.
+
+## Rejected experiment: bounded, non-chaining bundles
+
+> **Status (2026-08-27): not adopted.** Preserved for provenance only; the
+> active default remains the historical `strict` bundler, now used safely
+> below its percolation transition via calibration instead.
+
+`--bundle-method bounded` selects the separate `bundle_fwer_bounded_omp`
+executable (same source as `bundle_fwer_omp.cpp`, built with
+`DEFAULT_BOUNDED_BUNDLES`). It defines a bundle around its strongest
+unassigned representative edge; a candidate joins only when its endpoints
+can be oriented so each lies within `neighbor_dist` of the corresponding
+representative endpoint, giving every bundle a hard Chebyshev diameter of
+`2 * ceil(neighbor_dist)` voxels and preventing any transitive chain from
+expanding it further. This does prevent percolation, but a full 10k
+LTLE/RTLE run under this method found no grid-FWER-significant bundle and
+produced 219,927 small, visually arbitrary-looking bundles — rejected in
+favor of calibrating the historical bundler's threshold instead. Full
+record in `archives/bounded_bundling_experiment_2026_08_27/`.
+
+## Regression checks
 
 ```bash
 .venv/bin/python -m unittest 02_cudaPerm/regression_bundle_fwer.py
@@ -355,14 +223,50 @@ Regression checks:
 .venv/bin/python -m unittest 02_cudaPerm/regression_cuda_bundle.py
 ```
 
-The final check uses a tiny synthetic CUDA fixture and is skipped when a GPU
-or the newly built backend is unavailable.
+The last uses a tiny synthetic CUDA fixture and is skipped when a GPU or the
+newly built backend is unavailable. `bundle_fwer.py` is the readable Python
+reference implementation these regress against; it is not used for
+production runs (`bundle_fwer_omp` is, by default).
 
-### Optimization benchmark
+## Build
+
+```bash
+cmake -S 02_cudaPerm -B 02_cudaPerm/build
+cmake --build 02_cudaPerm/build \
+  --target permutationTest_cuda_bundle bundle_fwer_omp bundle_fwer_bounded_omp -j"$(nproc)"
+```
+
+## Generating permutations and file lists
+
+```bash
+python 02_cudaPerm/generatePermutations.py \
+  -nPerm 10000 -nA <n_group_A> -nB <n_group_B> -o permutations.txt
+```
+
+Row 0 is always the true observed grouping (`range(nA)`: the first `nA`
+filelist entries are group A), prepended automatically; rows 1.. are random
+label permutations. `t = mean(group A) - mean(group B)`, so a positive
+sign means group A greater and negative means group B greater — confirm
+which physical group is "A" in your filelist before interpreting bundle
+sign, since getting this backwards is a correctness bug, not a cosmetic one.
+
+The file list is one subject connectivity-matrix path per line, in the same
+order group A/group B were assigned when the permutation file was built:
+
+```bash
+find . -name 'groupA_subj*.ccmat' | sort > filelist.txt
+find . -name 'groupB_subj*.ccmat' | sort >> filelist.txt
+```
+
+`average_ccmat_runs.py` builds subject-mean connectivity matrices from
+repeated per-subject runs — the inferential unit is the subject, so repeated
+runs should be averaged rather than treated as independent observations.
+
+## Performance reference
 
 On the 37-subject LTLE/RTLE subject-mean dataset (59,677 voxels, 1.7806
-billion edges), the identical observed row plus 200 null rows at `|t| >= 3.9`
-gave:
+billion edges), the identical observed row plus 200 null rows at a fixed
+`|t| >= 3.9` gave:
 
 | Bundle engine | Total wall time | Speedup |
 |---|---:|---:|
@@ -370,8 +274,13 @@ gave:
 | C++/OpenMP (4 workers) | 0:11:48.59 | 44.09x |
 
 All 201 threshold-edge counts, retained-edge counts, bundle counts, observed
-edge assignments, observed bundle labels, and corrected p-values matched.
-Maximum-statistic differences from floating-point summation order were at most
-`3.97e-4` and did not change any corrected p-value. Peak process memory was
-about 36.7 GiB in the optimized run and was dominated by the unchanged CUDA
-input chunk.
+edge assignments, observed bundle labels, and corrected p-values matched
+between engines; maximum-statistic differences from floating-point
+summation order were at most `3.97e-4` and changed no corrected p-value.
+Peak process memory was ~36.7 GiB, dominated by the CUDA input chunk.
+
+A full 10,000-permutation single-threshold production run (68 subjects,
+`p_CF=5e-6`) completed in well under an hour of CUDA + bundling time once
+data was read; the dominant real-world cost at that scale is reading each
+subject's full connectivity matrix from disk once per CUDA invocation
+(tens to hundreds of GB total) — see the batch-size note above.

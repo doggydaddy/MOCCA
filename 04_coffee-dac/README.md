@@ -54,6 +54,65 @@ $value$ is the weight of the connection. Currently, the framework only support
 *thresholded* connections, hence $value$ is not used and assumed to take the
 value of $1$.
 
+## Choosing v2 vs v3
+
+The pipeline that produces the input CSVs here is now the bundle-level FWER
+path in `02_cudaPerm/` (see its README) plus
+`03_prepResultsForVisualization/prepare_bundle_single_fwer.py`. That changes
+what a "bundle" typically looks like: FWER-significant bundles under the
+percolation-calibrated threshold are often already network-scale (thousands
+of edges) rather than the many small bundles v1/v2's `hc2` step was designed
+to merge upward into networks. There is nothing left to merge for those —
+they *are* the network.
+
+- **v2 (agglomerative, `hc2`)** — use when the exported significant bundle(s)
+  are still small/numerous enough that grouping several of them together
+  into a handful of networks would actually help interpretation. This is the
+  original COFFEE-DAC bundle → network direction.
+- **v3 (divisive)** — use when a single significant bundle is already
+  large/network-scale on its own. v3 treats that bundle as the "network" and
+  divides its individual edges into sub-bundles instead, for legibility only.
+  See below.
+
+There's no fixed edge-count rule for which to pick — look at the exported
+bundle sizes (`observed_bundles_fwer.csv`'s `edge_count` column) and decide
+based on whether merging or dividing would make the result easier to read.
+
+## Pipeline v3: divisive sub-bundling
+
+Hierarchical clustering has no native divisive primitive, so v3 goes the
+only direction agglomerative clustering can: it treats the individual
+**edge** as the smallest available unit (the same leaves `hc1` already
+builds its tree from via `h1_dist` — the identical edge-to-edge distance
+metric v1/v2 use to form bundles from a raw edge pool), builds one linkage
+tree directly over a significant bundle's edges, and cuts that tree into N
+sub-bundles. The p-value column is never touched: every sub-bundle keeps the
+single whole-bundle FWER p-value it started with, since this is a rendering
+aid, not a new statistical claim — splitting a significant bundle for
+legibility must never be read as separate, uncorrected significance for any
+individual piece.
+
+```bash
+# First run: build the tree and cut into 6 sub-bundles
+python run_pipeline_v3.py path/to/significant_bundle_export.csv --bundles 6
+
+# Re-cut an existing v3 cache into a different count -- instant, no
+# recomputation (same "cache the whole tree, cut wherever" trick as v2's
+# --recut for networks)
+python run_pipeline_v3.py path/to/significant_bundle_export.csv --recut 10
+```
+
+Refuses (rather than silently degrading to an approximate tree) above
+`--max-exact` edges (default 50,000, matching v1's own `hc1` default) since
+an exact edge-level linkage tree needs O(N²) distances and a full tree is
+required for the instant-recut guarantee above to actually hold.
+
+In the GUI, the same "cached results found" dialog now also detects a v3
+cache and offers **Load existing v3 results — divisive (fast)**; the recut
+spinbox relabels itself to "Cut this bundle into N sub-bundles" when a v3
+cache is selected. Both v2 and v3 caches can coexist for the same input CSV
+(different filename suffixes), so trying both is non-destructive.
+
 ## Processing provenance and v2 caches
 
 Every successful v2 processing run writes a three-file result set beside the
