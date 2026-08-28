@@ -106,6 +106,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("grid_results", type=Path)
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("dataset_label", help='short slug for output filenames, e.g. "controlsVSpatients"')
+    parser.add_argument("--positive-label", required=True, help='e.g. "controls > patients"')
+    parser.add_argument("--negative-label", required=True, help='e.g. "patients > controls"')
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument(
         "--top-bundles-per-threshold", type=int, default=0,
@@ -180,7 +183,7 @@ def main() -> int:
                 if args.top_bundles_per_threshold else ""
             )
             raw_output = output_root / (
-                f"LTLEvsRTLE_gridFWER_{slug}{selection_suffix}.csv"
+                f"{args.dataset_label}_gridFWER_{slug}{selection_suffix}.csv"
             )
             processed_output = raw_output.with_name(
                 f"{raw_output.stem}_v2_processed.csv"
@@ -248,8 +251,8 @@ def main() -> int:
                         args.top_bundles_per_threshold
                     ),
                     "pvalue_column": "bundle-level p_grid_fwer",
-                    "positive_effect": "LTLE > RTLE",
-                    "negative_effect": "RTLE > LTLE",
+                    "positive_effect": args.positive_label,
+                    "negative_effect": args.negative_label,
                     "selected_source_bundles": selected[
                         ["bundle", "sign", "edge_count", "mass", "p_grid_fwer"]
                     ].to_dict(orient="records"),
@@ -263,7 +266,7 @@ def main() -> int:
 
     pd.DataFrame(summary_rows).to_csv(output_root / "visualization_summary.csv", index=False)
     (output_root / "README.md").write_text(
-        "# LTLE vs RTLE grid-FWER visualization exports\n\n"
+        f"# {args.dataset_label} grid-FWER visualization exports\n\n"
         + (
             f"This is an **exploratory, non-significance-filtered** export of "
             f"the {args.top_bundles_per_threshold} smallest adjusted-p bundles "
@@ -278,9 +281,10 @@ def main() -> int:
         "Open `04_coffee-dac/pyqt_launcher.py`, select one of the CSV files that "
         "does **not** end in `_v2_processed.csv`, then choose **Load existing v2 "
         "results (fast)**. The accompanying processed CSV already contains the "
-        "permutation-derived bundles. Positive effects are LTLE > RTLE; negative "
-        "effects are RTLE > LTLE. The `pvalue` column contains bundle-level "
-        "grid-adjusted FWER p-values, repeated for each member edge.\n"
+        "permutation-derived bundles. Positive effects are "
+        f"{args.positive_label}; negative effects are {args.negative_label}. "
+        "The `pvalue` column contains bundle-level grid-adjusted FWER "
+        "p-values, repeated for each member edge.\n"
     )
     print(pd.DataFrame(summary_rows).to_string(index=False))
     return 0

@@ -61,8 +61,16 @@ inferential result files.
 
 ```bash
 .venv/bin/python 03_prepResultsForVisualization/prepare_bundle_grid_fwer.py \
-  /path/to/bundle_grid_results /path/to/visualization_output --alpha 0.05
+  /path/to/bundle_grid_results /path/to/visualization_output \
+  <dataset_label> \
+  --positive-label "group A > group B" --negative-label "group B > group A" \
+  --alpha 0.05
 ```
+
+`--positive-label`/`--negative-label` are required here for the same reason
+as the single-threshold export above: this script has no dataset baked into
+it, and guessing the direction would risk mislabeling whichever comparison
+it's actually pointed at.
 
 Same GUI loading convention as above. If no bundles survive the chosen
 alpha, `--top-bundles-per-threshold N` gives the same kind of explicitly
