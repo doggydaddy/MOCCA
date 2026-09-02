@@ -25,6 +25,17 @@ CCMAT_HEADER = struct.Struct("<IIQQ")
 CCMAT_MAGIC = 0x43434D54
 CUDA_DEVICE = Path("/dev/nvidia0")
 
+# The smallest legal disjoint partition: row 0 observed, row 1 calibration-only
+# (never read by inference), row 2 the single inference null. Every fixture
+# permutation file below therefore has three unique rows, and p_FWER has
+# denominator inference_permutations + 1 = 2.
+TINY_PARTITION = (
+    "--calibration-permutations", "1",
+    "--calibration-start-row", "1",
+    "--inference-permutations", "1",
+    "--inference-start-row", "2",
+)
+
 
 def write_ccmat(path: Path, values: np.ndarray, n_voxels: int) -> None:
     values = np.asarray(values, dtype="<f4")
@@ -56,7 +67,8 @@ class CudaBundleEndToEndTests(unittest.TestCase):
             filelist = temporary / "filelist.txt"
             filelist.write_text("".join(f"{path}\n" for path in subject_paths))
             permutations = temporary / "permutations.txt"
-            permutations.write_text("0 1\n0 2\n")
+            # row 0 observed, row 1 calibration-only, row 2 the inference null
+            permutations.write_text("0 1\n1 3\n0 2\n")
             mask = temporary / "mask.dump"
             np.savetxt(
                 mask,
@@ -81,12 +93,14 @@ class CudaBundleEndToEndTests(unittest.TestCase):
                     "--batch-size", "2",
                     "--capacity", "100",
                     "--backend", str(BACKEND),
+                    *TINY_PARTITION,
                 ],
                 check=True,
             )
 
             maxima = pd.read_csv(output_dir / "permutation_bundle_maxima.csv")
-            self.assertEqual(maxima["permutation"].tolist(), [0, 1])
+            # calibration row 1 is never computed; only row 0 and inference row 2
+            self.assertEqual(maxima["permutation"].tolist(), [0, 2])
             self.assertEqual(maxima["bundles"].tolist(), [1, 0])
             self.assertAlmostEqual(maxima.loc[0, "max_statistic"], 18.283772, places=4)
             self.assertEqual(maxima.loc[1, "max_statistic"], 0.0)
@@ -116,7 +130,8 @@ class CudaBundleEndToEndTests(unittest.TestCase):
             filelist = temporary / "filelist.txt"
             filelist.write_text("".join(f"{path}\n" for path in subject_paths))
             permutations = temporary / "permutations.txt"
-            permutations.write_text("0 1 2 3 4\n0 2 4 6 8\n")
+            # row 0 observed, row 1 calibration-only, row 2 the inference null
+            permutations.write_text("0 1 2 3 4\n1 3 5 7 9\n0 2 4 6 8\n")
             mask = temporary / "mask.dump"
             np.savetxt(
                 mask,
@@ -141,6 +156,7 @@ class CudaBundleEndToEndTests(unittest.TestCase):
                     "--batch-size", "2",
                     "--capacity", "100",
                     "--backend", str(BACKEND),
+                    *TINY_PARTITION,
                     "--bundle-method", "bounded",
                     "--keep-sparse",
                 ],
@@ -189,6 +205,7 @@ class CudaBundleEndToEndTests(unittest.TestCase):
                     "--batch-size", "2",
                     "--capacity", "100",
                     "--backend", str(BACKEND),
+                    *TINY_PARTITION,
                     "--keep-sparse",
                 ],
                 check=True,

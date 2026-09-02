@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """Drive sparse CUDA permutations and calculate bundle-level FWER values.
 
-Row 0 of the permutation file is treated as the observed grouping.  Rows 1..
-are the random group-label permutations.  The CUDA backend writes only edges
-above either a fixed cluster-forming |t| threshold or a df-aware two-sided
-cluster-forming p threshold; this controller forms spatial bundles
-for every row and builds the null distribution of the maximum bundle statistic.
+Row 0 of the permutation file is treated as the observed grouping.  The CUDA
+backend writes only edges above either a fixed cluster-forming |t| threshold
+or a df-aware two-sided cluster-forming p threshold; this controller forms
+spatial bundles for every row and builds the null distribution of the maximum
+bundle statistic.
+
+Null rows are partitioned (see permutation_rows.py).  Inference reads row 0
+plus the *inference* range only -- by default rows 1001..11000 -- while
+percolation_calibration.py chose the cluster-forming threshold from the
+disjoint calibration range, rows 1..1000.  Calibration maxima never enter the
+FWER numerator or denominator, so with the default 10,000 inference
+permutations::
+
+    p_FWER = (1 + #{inference maxima >= observed}) / 10001
+
+and the minimum attainable p-value stays 1/10001 even though 11,000 null
+permutations were computed in total.
 """
 
 from __future__ import annotations
@@ -25,6 +37,12 @@ import numpy as np
 import pandas as pd
 
 from bundle_fwer import BundleStatisticResult, compute_bundle_statistics
+from permutation_rows import (
+    add_partition_arguments,
+    partition_from_args,
+    sha256_file,
+    validate_permutation_file,
+)
 
 
 MAGIC = 0x4C444E42
@@ -226,8 +244,8 @@ def parse_args() -> argparse.Namespace:
               "is included in FWER correction using permutation min-p"),
     )
     parser.add_argument(
-        "--null-permutations", type=int,
-        help="number of null rows to use (default: every row after row 0)",
+        "--null-permutations", type=int, default=None,
+        help=argparse.SUPPRESS,  # removed; see the error raised in main()
     )
     parser.add_argument("--statistic", choices=("mass", "extent"), default="mass")
     parser.add_argument("--neighbor-dist", type=float, default=1.0)
@@ -258,12 +276,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bundle-threads", type=int, default=4)
     parser.add_argument("--keep-sparse", action="store_true")
+    parser.add_argument(
+        "--freedman-lane-plan", type=Path, default=None,
+        help="freedman_lane_plan.flp from freedman_lane.py. Switches the CUDA "
+             "backend from the unadjusted Welch statistic to the "
+             "covariate-adjusted HC2 Freedman-Lane statistic, and requires a "
+             "full-index permutation file.",
+    )
     parser.add_argument("--resume", action="store_true", help="continue a run with the identical saved configuration")
+    add_partition_arguments(parser, stage="inference")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.null_permutations is not None:
+        raise ValueError(
+            "--null-permutations has been replaced by --inference-permutations, "
+            "because the null rows are now partitioned into a calibration-only "
+            "range and a disjoint inference-only range. Pass "
+            f"--inference-permutations {args.null_permutations} (and, if the "
+            "master file's layout differs from the default, "
+            "--inference-start-row) instead."
+        )
     grid_mode = args.cluster_forming_p_grid is not None
     threshold_grid = (
         sorted(set(args.cluster_forming_p_grid), reverse=True)
@@ -310,13 +345,48 @@ def main() -> int:
         if not path.exists():
             raise FileNotFoundError(path)
 
-    total_rows = count_nonempty_lines(permutations)
-    if total_rows < 2:
-        raise ValueError("Permutation file needs observed row 0 and at least one null row.")
-    null_count = total_rows - 1 if args.null_permutations is None else args.null_permutations
-    if null_count < 1 or null_count >= total_rows:
-        raise ValueError(f"Requested {null_count} null permutations, but file provides {total_rows - 1}.")
-    requested_rows = null_count + 1
+    freedman_lane_plan = (
+        args.freedman_lane_plan.resolve()
+        if args.freedman_lane_plan is not None else None
+    )
+    if freedman_lane_plan is not None:
+        if not freedman_lane_plan.exists():
+            raise FileNotFoundError(freedman_lane_plan)
+        if not df_aware:
+            raise ValueError(
+                "--freedman-lane-plan requires --cluster-forming-p or "
+                "--cluster-forming-p-grid: the adjusted statistic is "
+                "thresholded at a fixed residual df."
+            )
+        if args.bundle_engine != "cpp":
+            raise ValueError(
+                "--freedman-lane-plan requires --bundle-engine cpp; the Python "
+                "oracle implements the unadjusted Welch statistic only."
+            )
+
+    partition = partition_from_args(args)
+    # Rejects overlapping calibration/inference ranges, a non-observed row 0,
+    # duplicate rows and an incorrect total row count before any GPU work.
+    # Under Freedman-Lane every row must also be a complete participant
+    # reordering, so a group-membership file is rejected here rather than
+    # silently misinterpreted by the backend.
+    partition_report = validate_permutation_file(
+        permutations, partition,
+        allow_extra_rows=args.allow_extra_permutation_rows,
+        representation="full-index" if freedman_lane_plan else "group-a",
+        n_subjects=count_nonempty_lines(filelist),
+    )
+    null_count = partition.inference_count
+    selected_rows = partition.inference_rows_with_observed
+    requested_rows = len(selected_rows)
+    print(f"partition: {partition.describe()}", flush=True)
+    print(
+        f"inference uses row 0 and rows {partition.inference_start}.."
+        f"{partition.inference_stop - 1}; calibration rows "
+        f"{partition.calibration_start}..{partition.calibration_stop - 1} are "
+        "excluded from the FWER numerator and denominator",
+        flush=True,
+    )
 
     coordinates = np.loadtxt(mask, usecols=(0, 1, 2), dtype=np.float64, ndmin=2)
     n_voxels = int(coordinates.shape[0])
@@ -331,7 +401,28 @@ def main() -> int:
         "bundle_threads": args.bundle_threads if args.bundle_engine == "cpp" else None,
         "subjects": n_subjects,
         "voxels": n_voxels,
+        # Kept under the historical key so bundle_fwer_precision.py and older
+        # result directories keep working: this is the inference null count,
+        # which is what the p-value denominator is built from.
         "null_permutations": null_count,
+        **partition_report,
+        # NB: "statistic" below is the *bundle* statistic (mass/extent); this
+        # is the edgewise one, so the two keys must not be merged.
+        "edge_statistic": (
+            "hc2_freedman_lane_adjusted" if freedman_lane_plan else "welch_unadjusted"
+        ),
+        "edge_statistic_note": (
+            "HC2-studentized group coefficient under Freedman-Lane residual "
+            "permutation; equals Welch's t when no covariates are present"
+            if freedman_lane_plan
+            else "two-sample Welch t on group labels, no covariates"
+        ),
+        "freedman_lane_plan": (
+            str(freedman_lane_plan) if freedman_lane_plan else None
+        ),
+        "freedman_lane_plan_sha256": (
+            sha256_file(freedman_lane_plan) if freedman_lane_plan else None
+        ),
         "threshold_mode": "welch_df_aware_p" if df_aware else "fixed_t",
         "threshold": args.threshold,
         "cluster_forming_p": args.cluster_forming_p,
@@ -382,17 +473,26 @@ def main() -> int:
             }
         else:
             completed = set(previous_maxima["permutation"].astype(int))
-        if any(index < 0 or index >= requested_rows for index in completed):
-            raise ValueError("Saved maxima contain a permutation outside this run.")
+        stray = sorted(set(completed) - set(selected_rows))
+        if stray:
+            raise ValueError(
+                f"Saved maxima contain {len(stray)} permutation row(s) outside "
+                f"this run's inference set (first: {stray[0]}). A calibration "
+                "row must never enter the FWER null distribution."
+            )
 
-    missing = [index for index in range(requested_rows) if index not in completed]
+    missing = [index for index in selected_rows if index not in completed]
     sparse_dir = output_dir / "sparse_work"
     sparse_dir.mkdir(exist_ok=True)
     prefix = sparse_dir / "bundle"
     write_header = not maxima_path.exists()
 
     for batch in consecutive_batches(missing, args.batch_size):
-        print(f"Running CUDA rows {batch[0]}..{batch[-1]} of {requested_rows - 1}", flush=True)
+        print(
+            f"Running CUDA rows {batch[0]}..{batch[-1]} "
+            f"(inference rows through {partition.inference_stop - 1})",
+            flush=True,
+        )
         cluster_forming_value = (
             threshold_grid[0] if grid_mode
             else (args.cluster_forming_p if df_aware else args.threshold)
@@ -407,6 +507,8 @@ def main() -> int:
             command.extend(["--cluster-forming-p", str(cluster_forming_value)])
         if grid_mode:
             command.append("--store-df")
+        if freedman_lane_plan is not None:
+            command.extend(["--freedman-lane", str(freedman_lane_plan)])
         cuda_started = perf_counter()
         subprocess.run(command, check=True)
         cuda_seconds = perf_counter() - cuda_started
@@ -523,6 +625,14 @@ def main() -> int:
     if (len(maxima) != expected_maxima_rows
             or maxima["permutation"].nunique() != requested_rows):
         raise RuntimeError("The maximum-statistic distribution is incomplete.")
+    # The null distribution must be exactly the held-out inference rows: no
+    # calibration row, and no row outside the declared range.
+    if sorted(set(maxima["permutation"].astype(int))) != selected_rows:
+        raise RuntimeError(
+            "The maximum-statistic distribution does not match the declared "
+            "inference rows (row 0 plus "
+            f"{partition.inference_start}..{partition.inference_stop - 1})."
+        )
     if grid_mode:
         maxima = maxima.sort_values(["permutation", "threshold_index"])
         n_rows = requested_rows
@@ -573,6 +683,12 @@ def main() -> int:
         observed_all.to_csv(output_dir / "observed_bundles_grid_fwer.csv", index=False)
         summary = {
             **config,
+            "p_fwer_denominator": requested_rows,
+            "p_fwer_formula": (
+                "symmetric permutation min-p rank over the inference rows "
+                "and the observed row"
+            ),
+            "inference_maxima_used": requested_rows - 1,
             "minimum_attainable_p_fwer": 1 / requested_rows,
             "observed_bundles_across_thresholds": int(len(observed_all)),
             "complete": True,
@@ -590,21 +706,41 @@ def main() -> int:
     null_maxima = maxima.loc[maxima["permutation"] > 0, "max_statistic"].to_numpy(float)
     np.save(output_dir / "null_max_bundle_statistics.npy", null_maxima)
 
+    denominator = partition.fwer_denominator
+    if len(null_maxima) != partition.inference_count:
+        raise RuntimeError(
+            f"Null distribution has {len(null_maxima)} maxima but the "
+            f"partition declares {partition.inference_count} inference "
+            "permutations."
+        )
+
     observed_path = output_dir / "observed_bundles_uncorrected.csv"
     observed = pd.read_csv(observed_path)
     if len(observed):
-        observed["p_fwer"] = [
-            (1 + int(np.count_nonzero(null_maxima >= value))) / (null_count + 1)
+        exceedances = [
+            int(np.count_nonzero(null_maxima >= value))
             for value in observed["statistic"].to_numpy(float)
         ]
+        observed["inference_exceedances"] = exceedances
+        observed["p_fwer"] = [
+            (1 + count) / denominator for count in exceedances
+        ]
     else:
+        exceedances = []
+        observed["inference_exceedances"] = pd.Series(dtype=int)
         observed["p_fwer"] = pd.Series(dtype=float)
     observed.to_csv(output_dir / "observed_bundles_fwer.csv", index=False)
 
     summary = {
         **config,
         "observed_max_statistic": observed_stat,
-        "minimum_attainable_p_fwer": 1 / (null_count + 1),
+        "p_fwer_denominator": denominator,
+        "p_fwer_formula": (
+            "(1 + #{inference maxima >= observed}) / (inference_permutations + 1)"
+        ),
+        "inference_maxima_used": int(len(null_maxima)),
+        "inference_exceedance_counts": exceedances,
+        "minimum_attainable_p_fwer": 1 / denominator,
         "observed_bundles": int(len(observed)),
         "complete": True,
     }

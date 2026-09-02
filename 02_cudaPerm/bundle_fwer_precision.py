@@ -2,7 +2,9 @@
 """Monte Carlo precision report for a completed run_bundle_fwer.py result.
 
 Every FWER p-value this pipeline reports is a permutation-count ratio r/m
-(m = null_permutations + 1 trials, including the observed row itself; r =
+(m = null_permutations + 1 trials, including the observed row itself. Under the
+disjoint row partition the config's `null_permutations` is the *inference* null
+count, so m excludes the calibration rows exactly as the p-value does; r =
 how many of those m trials are at least as extreme as observed). That ratio
 is a binomial proportion, so it carries sampling uncertainty from having run
 only m permutations -- this script attaches an exact (Clopper-Pearson)

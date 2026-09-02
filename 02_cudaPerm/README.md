@@ -92,10 +92,25 @@ adjacency geometry, before any real inference is run.
 ```bash
 .venv/bin/python 02_cudaPerm/percolation_calibration.py \
   FILELIST PERMUTATIONS OUTPUT_DIR \
-  --calibration-permutations 200 \
   --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
   --bundle-threads 16
 ```
+
+Calibration now defaults to **rows 1–1000 only**, which are held out from
+inference — see "Disjoint calibration and inference permutations" below. It
+also reports how stable the selection is, by bootstrap-resampling and
+subdividing those calibration rows (never an inference row):
+
+```text
+=== Selection stability (calibration rows only) ===
+Bootstrap (1000 resamples): modal transition p_CF=1e-05 selected in 100.0% of replicates
+  selection counts: {'1e-05': 1000}
+Subdivision into 4 disjoint blocks of [250, 250, 250, 250] rows selected: [1e-05, 1e-05, 1e-05, 1e-05]
+```
+
+If the disjoint blocks disagree, the fix is a larger prospective calibration
+set or a stricter predeclared rule — never a peek at the held-out inference
+rows to break the tie.
 
 Reuses the same CUDA v3 sparse format as real inference: one CUDA pass at
 the most liberal grid threshold, then the C++ bundler re-thresholds the
@@ -136,11 +151,15 @@ analyses, but is not the default recommendation.
 .venv/bin/python 02_cudaPerm/run_bundle_fwer.py \
   FILELIST PERMUTATIONS OUTPUT_DIR \
   --cluster-forming-p 5e-6 \
-  --null-permutations 10000 \
   --statistic mass --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
   --bundle-method strict --bundle-engine cpp --bundle-threads 16 \
   --capacity 20000000 --batch-size 1000
 ```
+
+Inference defaults to **row 0 plus rows 1001–11000** — the 10,000 held-out
+nulls. `--null-permutations` has been removed in favour of
+`--inference-permutations`, and passing the old flag raises an error pointing
+at the replacement rather than silently running a different row set.
 
 (`--capacity` bounds sparse edges per CUDA part *per permutation row* — the
 default of 10M was seen to overflow on a dense real permutation; 20M has
@@ -163,6 +182,275 @@ tmux new-session -d -s <descriptive_name> \
   "<command> 2>&1 | tee OUTPUT_DIR/run.log"
 tmux attach -t <descriptive_name>   # detach: Ctrl-b d
 ```
+
+## Disjoint calibration and inference permutations
+
+Calibration picks the cluster-forming threshold from the null distribution.
+If inference then reuses those same null rows, the threshold was tuned on
+part of the data its own p-values are computed against. The fix is a held-out
+design, implemented in `permutation_rows.py` and shared by both stages:
+
+```text
+row 0             observed assignment
+rows 1..1000      calibration set only   (1,000 null permutations)
+rows 1001..11000  inference set only    (10,000 null permutations)
+```
+
+One master file with recorded, non-overlapping row ranges is easier to audit
+than separate seeds or files, and guarantees no label assignment is reused
+across the two stages. `generatePermutations.py` already draws every row
+uniquely, so the two subsets are disjoint by construction as well as by range.
+
+Because calibration maxima enter neither the numerator nor the denominator:
+
+```text
+p_FWER = (1 + #{inference maxima >= observed}) / 10001
+```
+
+The minimum attainable production p-value therefore stays `1/10001` even
+though 11,000 null permutations were computed in total. `observed_bundles_fwer.csv`
+now carries the raw `inference_exceedances` count alongside `p_fwer`, and
+`bundle_fwer_results.json` records `p_fwer_denominator` and `p_fwer_formula`
+explicitly.
+
+The partition is an explicit, validated configuration rather than an implicit
+convention. All four values are accepted by `generatePermutations.py`,
+`percolation_calibration.py` and `run_bundle_fwer.py`, and each stage records
+the **whole** partition in its manifest — not just the half it consumed:
+
+```text
+--calibration-permutations 1000   --calibration-start-row 1
+--inference-permutations  10000   --inference-start-row  1001
+```
+
+Before any GPU work, both stages validate the master file and reject:
+overlapping row ranges; duplicate rows; a row 0 that is not the observed
+assignment; the observed assignment reappearing as a null; a file too short
+for the declared ranges; and a row count that does not match the partition
+exactly (`--allow-extra-permutation-rows` to use a longer file deliberately).
+`run_bundle_fwer.py` additionally refuses to finish if the assembled null
+distribution is not exactly the declared inference rows, so a calibration row
+cannot leak into a resumed run.
+
+### Interpretation of the existing run
+
+The completed analysis used rows 1–200 for calibration and rows 1–10000 for
+inference, so its calibration set was a 200-row *subset* of the production
+null. That was not selection from the observed row, and a diagnostic
+recalculation found a negligible numerical effect — but it is less clean than
+a held-out design, and it remains reported accurately as the implementation
+used for the current draft. The disjoint 1,000 + 10,000 design above applies
+to the eventual combined Fisher-transform and covariate-adjusted confirmatory
+rerun. Re-running the old design requires stating the old row ranges
+explicitly (`--calibration-start-row 1 --calibration-permutations 200
+--inference-start-row 1 ...` is now rejected as overlapping, which is the
+point).
+
+## Covariate-adjusted Freedman--Lane model
+
+> **Status: implemented end to end and validated on GPU; not yet run in
+> production.** See `manuscript/ANALYSIS_DECISIONS.md` (2026-09-02,
+> "covariate-adjusted control--TLE analysis").
+
+The completed control--TLE analysis permutes group labels with no
+participant-level nuisance covariates. The confirmatory analysis estimates the
+group term while adjusting for the demographics available for all 68
+participants:
+
+```text
+r_ie = beta_0e + beta_Ge * group_i + beta_Ae * centered_age_i
+                                   + beta_Se * sex_i + error_ie
+```
+
+### The statistic: HC2, because HC2 *is* Welch
+
+The existing pipeline deliberately uses Welch's unequal-variance t, so the
+adjusted statistic must not quietly become a pooled-variance one. The
+resolution is not a compromise: for a two-group design with no covariates, the
+**HC2**-studentized group coefficient equals Welch's t *exactly* (asserted to
+12 decimal places in `regression_freedman_lane.py`). HC0 and HC3 do not.
+Adding covariates therefore changes the model without changing the variance
+assumptions, and the adjusted analysis is a strict generalization of the
+published one rather than a different statistic.
+
+### The permutation scheme
+
+Covariate adjustment is part of permutation inference; it cannot be applied to
+an observed result after the fact. `freedman_lane.py` implements
+Freedman--Lane residual permutation (Winkler et al., *NeuroImage* 2014;
+92:381--397): fit the reduced model `Z = [intercept, age, sex]`, permute its
+residuals, add the nuisance fitted values back, then fit `X = [Z, group]` and
+studentize. The same participant permutation is used for every edge, so
+downstream thresholding and bundling are unchanged.
+
+This needs **full-index permutations**: a complete reordering of all 68
+residual vectors. The existing files store only the membership of group A and
+cannot be reused. Generate the new representation with:
+
+```bash
+python 02_cudaPerm/generatePermutations.py \
+  -nA 26 -nB 42 -o permutations_fullindex.txt \
+  --representation full-index --seed <seed>
+```
+
+`--representation group-a` remains the default, so the unadjusted Welch
+pipeline is untouched. Validation rejects a group-membership file supplied
+where a full-index one is required, and vice versa.
+
+### Why 1.78 billion edges x 10,001 permutations is affordable
+
+Naively every (edge, permutation) pair needs its own regression. The algebra
+collapses. Writing `M_Z`, `M_X` for the residual makers and
+`a = M_Z g / (g'M_Z g)` for the Frisch--Waugh contrast, two orthogonality
+facts (`a'Z = 0` and `M_X H_Z = 0`) mean a Freedman--Lane draw depends on the
+data only through the **nuisance residuals** `u = M_Z y`, which are computed
+*once per edge* and reused by every permutation:
+
+```text
+numerator       = a' P u
+denominator^2   = u' (P' K P) u        K = M_X' diag(a_i^2/(1-h_ii)) M_X
+```
+
+`K` is one fixed matrix; `P'KP` only relabels it. Packing the upper triangle
+of `u u'` turns the whole permutation set into two dense matrix products per
+edge-chunk:
+
+```text
+numerators   = W  @ U       W:  (n_perm, 68)     U:  (68, n_edges)
+denominators = KP @ UU      KP: (n_perm, 2346)   UU: (2346, n_edges)
+```
+
+`freedman_lane.py` emits `W` and `KP` — 92 MiB of float32 at n=68, B=10001,
+small enough to stay resident on the GPU. float32 is safe here: `K` is
+positive semidefinite and the packed form is well conditioned, so the absolute
+error on `t` stays below 2.2e-6 (measured over 2000 edges x 51 permutations).
+Relative error does grow near `t = 0`, where the numerator cancels, but those
+edges are nowhere near any cluster-forming threshold.
+
+Measured cost: 48.3 MFLOP per edge, **86 PFLOP** for the whole graph. That is
+17 min at RTX 4090 peak fp32 and roughly 30--50 min at realistic GEMM
+efficiency — the same order as the existing pipeline, whose real-world cost is
+dominated by disk I/O anyway.
+
+### The CUDA backend
+
+`permutationTest_cuda_bundle --freedman-lane PLAN` switches the edge statistic
+from unadjusted Welch to adjusted HC2 without touching the rest of the
+pipeline: the same sparse format, the same C++ bundler, the same FWER
+machinery. The Welch path is unchanged and remains the default.
+
+Per part it runs `u = M_Z y` **once, in place** (only `p_z` temporaries are
+needed, so no scratch buffer and no halving of the part size), then one
+thresholding kernel per permutation reusing those residuals. Both kernels use
+the projector identities above, so no `n x n` matrix is ever formed.
+
+Two implementation details carry most of the performance:
+
+- **Subject-major staging.** The Welch path stores a part edge-major
+  (`[edge][subject]`). One thread per edge then strides `n_subjects * 4` bytes
+  and every warp touches 32 separate cache lines. `readRowsSubjectMajor`
+  loads the same rows as `[subject][edge]` instead — which is also a straight
+  copy rather than a strided scatter, since each subject's chunk is already
+  read contiguously — so consecutive threads read consecutive addresses. This
+  alone was worth 2.3x. A shared-memory staging buffer fixes the coalescing
+  too, but costs enough shared memory to cap occupancy near 16%, and measured
+  slower.
+- **Two passes, not one.** The squared denominator can be algebraically
+  expanded to `A - 2 d.b + d'Cd`, computable in a single pass over the data
+  (`C` turns out to be permutation-invariant). That halves DRAM traffic, but
+  it is the classic unstable computational formula: measured on 4000 edges it
+  raised the absolute error on `t` from 2.3e-6 to 1.2e-5. Since accuracy near
+  the cluster-forming threshold decides bundle membership, the two-pass form
+  is kept.
+
+Measured on 68 subjects x 1.12M edges, taking the marginal cost between 201-
+and 1201-permutation runs so fixture load and file writes cancel:
+
+| Variant | ns per edge-permutation | Full run (1.78e9 edges x 10,001) |
+|---|---:|---:|
+| edge-major, no staging | 1.87 | 9.2 h |
+| shared-memory staging | 1.30 | 6.4 h |
+| **subject-major (current)** | **0.56** | **~2.8 h** |
+
+At 0.56 ns the kernel moves ~971 GB/s, which is essentially the RTX 4090's
+DRAM bandwidth — the statistic is memory-bound, not compute-bound, so further
+gains would need L2 blocking (looping permutations inside an edge sub-chunk
+that fits in L2) rather than cheaper arithmetic.
+
+### Usage
+
+```bash
+# 1. design matrix (records its own coding, centering and contrast)
+.venv/bin/python 02_cudaPerm/design_matrix.py \
+  --file-list participants.txt --group-a-subjects 26 \
+  --output-dir adjusted/design
+
+# 2. Freedman-Lane tables for the held-out inference rows (row 0 + 1001..11000)
+.venv/bin/python 02_cudaPerm/freedman_lane.py \
+  --design adjusted/design/design.npz \
+  --permutations permutations_fullindex.txt \
+  --output-dir adjusted/tables
+
+# 3. calibrate p_CF on the held-out calibration rows (adjusted null geometry)
+.venv/bin/python 02_cudaPerm/percolation_calibration.py \
+  participants.txt permutations_fullindex.txt adjusted/calibration \
+  --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6
+
+# 4. adjusted inference on row 0 + the held-out inference rows
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py \
+  participants.txt permutations_fullindex.txt adjusted/results \
+  --cluster-forming-p <calibrated> \
+  --freedman-lane-plan adjusted/tables/freedman_lane_plan.flp \
+  --statistic mass --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
+  --bundle-method strict --bundle-engine cpp --bundle-threads 16 \
+  --capacity 20000000 --batch-size 1000
+```
+
+`run_bundle_fwer.py` records `edge_statistic`, the plan's SHA-256 and the
+permutation representation in `bundle_fwer_config.json`, and rejects a
+group-membership permutation file before any GPU work. Step 3 is **not
+optional**: `p_CF = 5e-6` was calibrated on the unadjusted Welch null and does
+not carry over.
+
+`design_matrix.py` encodes the covariate audit as behaviour, not commentary:
+
+- **age** centered on the analysis-sample mean, **sex** as a 1 = female
+  indicator — both recorded in `design_manifest.json` with the exact mean
+  subtracted and reference level;
+- **handedness** is *refused* as a primary covariate. All six left-handed
+  participants are patients, so group and handedness are not separable;
+  `--restrict-handedness R` runs the preferred 62-participant sensitivity
+  analysis (26 controls, 36 patients) instead, and `--allow-confounded` is
+  required to override deliberately;
+- **run count** is available only on explicit request, as a
+  measurement-precision covariate, never added by default;
+- **motion** has no entry at all: no motion summary was delivered with this
+  dataset, and none is inferred. The manifest records that absence explicitly;
+- a rank-deficient design is rejected rather than silently pseudo-inverted.
+
+### Correctness
+
+`freedman_lane.py` stays the oracle: `regression_cuda_freedman_lane.py` runs
+the real CUDA backend on a synthetic fixture with heteroscedastic noise, real
+covariate signal and a planted effect, and requires that the GPU select
+*exactly* the same suprathreshold edge set as the Python reference on every
+permutation. Measured agreement is 7.3e-7 on the statistic. It also drives
+`run_bundle_fwer.py` end to end and checks that the planted spatial effect
+survives bundle-FWER, that the calibration row is never computed, and that the
+denominator is the inference count plus one.
+
+`freedman_lane.py` carries two independent implementations that are checked
+against each other (`statistics` via the packed GEMM form, and
+`statistics_projector` via the projector form the kernel uses); they agree to
+1.8e-15.
+
+### One documented approximation
+
+The df-aware threshold uses a fixed residual df of `n - rank(X)` = 64. Unlike
+Welch's edge-specific Satterthwaite df, an HC-studentized coefficient has no
+exact small-sample null distribution, so that df is used *only* to convert a
+cluster-forming p into a `|t|` threshold — never to report a p-value. FWER
+control comes from the permutation distribution, which does not depend on it.
 
 ## Monte Carlo precision of the reported p-values
 
@@ -209,7 +497,6 @@ the threshold search itself.
 ```bash
 .venv/bin/python 02_cudaPerm/run_bundle_fwer.py FILELIST PERMUTATIONS OUTPUT \
   --cluster-forming-p-grid 1e-5 5e-6 2e-6 1e-6 \
-  --null-permutations 10000 \
   --statistic mass --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
   --bundle-method strict --bundle-engine cpp --bundle-threads 16
 ```
@@ -248,7 +535,26 @@ record in `archives/bounded_bundling_experiment_2026_08_27/`.
 .venv/bin/python -m unittest 02_cudaPerm/regression_bundle_fwer.py
 .venv/bin/python -m unittest 02_cudaPerm/regression_bundle_fwer_cpp.py
 .venv/bin/python -m unittest 02_cudaPerm/regression_cuda_bundle.py
+.venv/bin/python -m unittest 02_cudaPerm/regression_permutation_partition.py
+.venv/bin/python -m unittest 02_cudaPerm/regression_freedman_lane.py
+.venv/bin/python -m unittest 02_cudaPerm/regression_cuda_freedman_lane.py
 ```
+
+`regression_permutation_partition.py` covers the row partition over a small
+synthetic permutation file whose calibration rows, inference rows, exceedance
+count and denominator are known exactly, plus the calibration stability
+assessment and the full-index permutation representation.
+
+`regression_freedman_lane.py` covers the covariate-adjusted model: the exact
+HC2/Welch equivalence, the two-GEMM path against a literal per-draw
+regression, float32 error bounds, design-matrix coding and refusals, and
+exchangeability — that uncorrected p-values really are uniform under the null
+when heteroscedastic noise and genuine age/sex signal are present, and that
+covariate structure alone does not manufacture group effects.
+
+`regression_cuda_freedman_lane.py` runs the real CUDA backend against that
+oracle and drives the adjusted pipeline end to end; it is skipped without a
+GPU or a built backend.
 
 The last uses a tiny synthetic CUDA fixture and is skipped when a GPU or the
 newly built backend is unavailable. `bundle_fwer.py` is the readable Python
@@ -267,8 +573,13 @@ cmake --build 02_cudaPerm/build \
 
 ```bash
 python 02_cudaPerm/generatePermutations.py \
-  -nPerm 10000 -nA <n_group_A> -nB <n_group_B> -o permutations.txt
+  -nA <n_group_A> -nB <n_group_B> -o permutations.txt --seed <seed>
 ```
+
+This writes **11,001 rows** by default: row 0 observed, 1,000 calibration
+nulls, 10,000 inference nulls. It validates what it wrote and emits
+`permutations.txt.partition.json` recording the seed, row ranges, SHA-256, the
+unique-row count, and the resulting FWER denominator.
 
 Row 0 is always the true observed grouping (`range(nA)`: the first `nA`
 filelist entries are group A), prepended automatically; rows 1.. are random
@@ -288,6 +599,19 @@ find . -name 'groupB_subj*.ccmat' | sort >> filelist.txt
 `average_ccmat_runs.py` builds subject-mean connectivity matrices from
 repeated per-subject runs — the inferential unit is the subject, so repeated
 runs should be averaged rather than treated as independent observations.
+
+`01p5_FisherCC/fisher_aggregate_ccmat.py` is its planned successor: it does
+the same run-to-participant aggregation but on the Fisher `z` scale
+(`atanh(r)`), which is better behaved for averaging and linear group
+modelling than raw `r`. Its `raw-equal` mode reproduces `average_ccmat_runs.py`
+bitwise, so the two scales can be compared without an implementation change
+confounding the comparison. It also emits a per-file provenance sidecar and a
+run manifest. It is implemented and validated but **not yet run in
+production** — see `01p5_FisherCC/README.md` and the decision log in
+`manuscript/ANALYSIS_DECISIONS.md`. Note that a switch to Fisher `z`
+invalidates the existing `p_CF = 5e-6` calibration, which was measured on
+raw-`r` participant matrices; `percolation_calibration.py` must be rerun
+before any inference on Fisher `z` inputs.
 
 ## Performance reference
 

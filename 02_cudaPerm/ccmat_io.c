@@ -253,6 +253,41 @@ void closeAllSubjectFiles(FileHandleArray* fha)
 /// Binary path: single fseek + fread per subject — orders of magnitude faster
 /// than the text path.
 ///
+/* Subject-major variant of readRowsFromOpenFiles: element (subject, row) goes
+ * to buffer[sub_idx * n_vals + r]. Each subject's chunk is already read
+ * contiguously, so this is a straight copy rather than a strided scatter. */
+void readRowsSubjectMajor(FileHandleArray* fha, size_t N, size_t M,
+                          int nr_sub, float* buffer)
+{
+    size_t n_vals = M - N + 1;
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int sub_idx = 0; sub_idx < nr_sub; sub_idx++)
+    {
+        FILE* stream = fha->file_handles[sub_idx];
+        float* target = buffer + (size_t)sub_idx * n_vals;
+
+        rewind(stream);
+        uint32_t magic = 0;
+        fread(&magic, sizeof(uint32_t), 1, stream);
+        if (magic != CCMAT_MAGIC)
+        {
+            fprintf(stderr,
+                "readRowsSubjectMajor requires binary ccmat input "
+                "(subject %d is not).\n", sub_idx);
+            exit(EXIT_FAILURE);
+        }
+
+        long offset = (long)(CCMAT_HDR_SIZE + N * sizeof(float));
+        fseek(stream, offset, SEEK_SET);
+        size_t nread_vals = fread(target, sizeof(float), n_vals, stream);
+        if (nread_vals != n_vals)
+            fprintf(stderr, "WARNING: subject %d: expected %zu vals, got %zu\n",
+                    sub_idx, n_vals, nread_vals);
+    }
+}
+
+
 void readRowsFromOpenFiles(FileHandleArray* fha, size_t N, size_t M,
                            int nr_sub, float* buffer)
 {

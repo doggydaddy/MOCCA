@@ -59,6 +59,11 @@ FileHandleArray* openAllSubjectFiles(char* filelist, size_t nr_subs);
 void             closeAllSubjectFiles(FileHandleArray* fha);
 void             readRowsFromOpenFiles(FileHandleArray* fha, size_t N, size_t M,
                                        int nr_sub, float* buffer);
+/* Same rows, transposed: buffer[sub_idx * n_vals + r] instead of
+ * buffer[r * nr_sub + sub_idx]. Subject-major lets a CUDA thread per edge read
+ * coalesced across a warp, which the edge-major layout cannot do. */
+void             readRowsSubjectMajor(FileHandleArray* fha, size_t N, size_t M,
+                                      int nr_sub, float* buffer);
 
 /* ── Batch parser (opens/closes per call; used by single-chunk path) ── */
 void parseSingleSubjectFile(const char* filepath, int sub_idx, int nr_sub,
