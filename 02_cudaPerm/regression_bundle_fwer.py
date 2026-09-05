@@ -14,6 +14,9 @@ import pandas as pd
 
 CUDA_PERM_DIR = Path(__file__).resolve().parent
 COFFEE_DIR = CUDA_PERM_DIR.parent / "04_coffee-dac"
+# The cached bundle fixtures moved under archives/ in the 2026-08-28
+# repository cleanup; regression_bundle_fwer_cpp.py already tracks them there.
+RESULT_FIXTURES = COFFEE_DIR / "archives/results_archives"
 for module_dir in (CUDA_PERM_DIR, COFFEE_DIR):
     if str(module_dir) not in sys.path:
         sys.path.insert(0, str(module_dir))
@@ -90,7 +93,7 @@ class CurrentCacheRegressionTests(unittest.TestCase):
     def test_bundle_stage_matches_current_v2_caches(self) -> None:
         for filename in self.CASES:
             with self.subTest(filename=filename):
-                raw_path = COFFEE_DIR / filename
+                raw_path = RESULT_FIXTURES / filename
                 stem = raw_path.with_suffix("")
                 processed_path = Path(f"{stem}_v2_processed.csv")
                 params_path = Path(f"{stem}_v2_params.json")
