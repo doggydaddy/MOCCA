@@ -170,6 +170,203 @@ Produces `observed_bundles_fwer.csv` (every surviving bundle's `edge_count`,
 member edge, for visualization). Hand these to
 `03_prepResultsForVisualization/prepare_bundle_single_fwer.py`.
 
+### Choosing the correction: `--fwer` (default) or `--fdr`
+
+`--fwer` and `--fdr` are mutually exclusive and select which error rate the
+run reports. They consume different parts of the same permutation set, so the
+choice must be declared before the p-values are seen — not after.
+
+- **`--fwer` (default, unchanged).** Each observed bundle is ranked against
+  the distribution of per-permutation *maxima*: one number per permutation.
+  Bounds the probability of *any* false bundle. Writes
+  `observed_bundles_fwer.csv` with `p_fwer`.
+- **`--fdr`.** Each observed bundle is ranked against the pooled distribution
+  of *individual* null bundle statistics, then adjusted step-up. Bounds the
+  expected proportion of false bundles among those declared. Writes
+  `observed_bundles_fdr.csv` with `p_uncorrected`, `p_fdr_bh`, `p_fdr_by`,
+  and `significant`.
+
+```bash
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py \
+  FILELIST PERMUTATIONS OUTPUT_DIR \
+  --cluster-forming-p 5e-6 --fdr --fdr-q 0.05 --fdr-method bh \
+  --statistic mass --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
+  --bundle-method strict --bundle-engine cpp --bundle-threads 16 \
+  --capacity 20000000 --batch-size 1000
+```
+
+Under `--fdr` the C++ backend is additionally passed `--bundle-statistics`
+(an opt-in flag; default off leaves its existing output byte-identical), and
+the per-batch rows are streamed into `permutation_bundle_statistics.csv`.
+Because that file and `permutation_bundle_maxima.csv` are appended
+separately, the maxima file's `bundles` column is cross-checked against the
+per-permutation row count before any p-value is computed, so an interrupted
+run cannot silently produce a correction over duplicated or missing bundles.
+
+Three properties of this path to keep in view when reporting it:
+
+- **The guarantee is genuinely weaker, and "false bundle" is not a mild
+  failure** — an FDR-declared bundle can be large. See Chumbley & Friston
+  (2009) on topological FDR before presenting these as if they were FWER
+  results.
+- **The pooled null is dominated by small bundles**, since a typical null
+  permutation produces many small ones and few large. A large observed bundle
+  therefore attracts a very small `p_uncorrected`, and `--fdr` can move a
+  result from no significant bundles to many. That is a different claim, not
+  a stronger one.
+- **`p_fdr_by` is always written alongside `p_fdr_bh`.** BH assumes positive
+  regression dependence; bundle statistics within one permutation are
+  dependent in a way that is not proven to satisfy it. BY is valid under
+  arbitrary dependence, at the cost of a `c(m) = sum 1/k` factor recorded in
+  `bundle_fwer_results.json`. `--fdr-method` only decides which column drives
+  `significant`; both are always reported.
+
+`--fdr` is refused with `--cluster-forming-p-grid`, whose min-p correction is
+family-wise over thresholds by construction and has no FDR analogue here.
+
+#### Measuring the false-positive rate instead of assuming it
+
+Whether BH's positive-dependence assumption (PRDS) holds for a *data-dependent*
+partition of edges into bundles is not settled by theory or intuition -- and
+note that BY does not rescue the harder half of the problem either, since its
+proof also assumes a fixed family of hypotheses, not a random number of
+randomly-shaped ones. But the thing that matters is directly measurable.
+
+Under the **complete null** every rejection is false, so FDP is 1 whenever
+anything is rejected and 0 otherwise, and therefore
+
+    FDR = E[FDP] = P(at least one rejection)
+
+exactly. A procedure controlling FDR at `q` must declare at least one bundle in
+at most a fraction `q` of pure-null permutations. `fdr_null_calibration.py`
+checks this on the run's own permutations: each null permutation is treated in
+turn as if it were the observed row and ranked against a pooled null built from
+every *other* permutation (exact leave-one-out, so a permutation never
+contributes to the distribution judging it), then BH and BY are applied and the
+rejections counted.
+
+```bash
+.venv/bin/python 02_cudaPerm/fdr_null_calibration.py \
+  RESULT_DIR/permutation_bundle_statistics.csv CALIB_DIR --fdr-q 0.05
+```
+
+The reported any-rejection rate carries a Wilson interval, so a rate near `q`
+is not over-read at finite permutation counts. If BH's rate sits at or below
+`q`, the assumption is doing no harm here and BH is the defensible primary; if
+it inflates, BY is justified by measurement rather than by argument. Two limits
+to carry into the write-up: this tests control under the complete null only
+(partial-null FDR is not directly checkable this way), and it inherits the
+bundling and threshold settings of the run that produced its input.
+
+Correction arithmetic lives in `false_discovery.py` (pooled-null p-values,
+BH and BY step-up adjustment) and is covered by `regression_bundle_fdr.py`,
+which checks it against `scipy.stats.false_discovery_control` on random and
+tied input, checks the C++ emitter against the Python bundle oracle, and
+checks that the emitter stays opt-in.
+
+### Threshold-free cluster enhancement (`--statistic tfce`)
+
+TFCE (Smith & Nichols, *NeuroImage* 2009;44:83-98) removes the
+cluster-forming threshold from the inference entirely, integrating over a grid
+of heights instead:
+
+    TFCE(e) = sum_h  extent(e, h)^E * h^H * dh
+
+Elements are **edges**, and the adjacency integrated over is the strict
+bundler's own (share an endpoint voxel, free endpoints within Chebyshev
+`neighbor_dist`) -- nothing new is invented, TFCE enhances the bundle geometry
+already in use. Three decisions, all deliberate and recorded here:
+
+- **Height is the z-equivalent of the edge's two-sided p, not `|t|`.** Welch's
+  Satterthwaite df varies per edge, so raw `|t|` is not comparable across the
+  map. Thresholding at height `z` thresholds each edge at its own critical t.
+- **Extent is distinct voxels touched, not edge count.** A densely connected
+  region of V voxels carries ~V^2/2 edges, so an edge-count extent would act
+  like a doubled exponent and restore the giant-component domination TFCE
+  exists to damp. This also matches the percolation calibration's finding that
+  voxel-fraction behaves where edge-fraction does not.
+- **No pruning during integration.** `min_size`, `min_cluster_voxels` and the
+  isolated-edge filters are legibility filters, not statistical ones, so they
+  are applied only to the bundles finally reported. The permutation maximum is
+  therefore the *unpruned* one, and each reported bundle (whose statistic is
+  the maximum TFCE among its edges) is ranked against a null that pruning
+  never narrowed. That is conservative by construction, and is asserted
+  directly in `regression_bundle_tfce.py`.
+
+TFCE requires the v3 df-stored sparse format, so `run_bundle_fwer.py` adds
+`--store-df` to the CUDA pass and `--records-contain-df` to the bundler
+automatically. `--cluster-forming-p` no longer names a cluster-forming
+threshold in this mode -- it only says how liberally the sparse edges are
+stored, and the run is refused if it does not reach the bottom of the height
+grid, rather than silently truncating the integral.
+
+```bash
+.venv/bin/python 02_cudaPerm/run_bundle_fwer.py \
+  FILELIST PERMUTATIONS OUTPUT_DIR \
+  --statistic tfce --cluster-forming-p 1e-4 \
+  --tfce-z-min 4.0 --tfce-z-max 7.0 --tfce-z-step 0.1 \
+  --tfce-extent-exponent 0.5 --tfce-height-exponent 2.0 \
+  --neighbor-dist 1.0 --min-size 10 --min-cluster-voxels 6 \
+  --bundle-engine cpp --bundle-threads 16 \
+  --capacity 20000000 --batch-size 1000
+```
+
+#### `--tfce-z-min` is the cost parameter, and it is not free
+
+The lowest integration height fixes how many edges are retained *and* how many
+heights are walked, so cost grows steeply as it falls. At this pipeline's
+1.78e9 edges:
+
+| `--tfce-z-min` | two-sided p | ~null edges/permutation | heights to z=7 at dz=0.1 |
+|---:|---:|---:|---:|
+| 3.0 | 2.7e-3 | 4,805,637 | 41 |
+| 3.5 | 4.65e-4 | 828,160 | 36 |
+| 4.0 | 6.33e-5 | 112,750 | 31 |
+| 4.42 | 9.87e-6 | 17,569 | 26 |
+| 5.0 | 5.73e-7 | 1,020 | 21 |
+
+Integrating from z=2 or 3, as one would on a voxel map, is not tractable here.
+This is worth stating plainly in the write-up: **TFCE removes the sharp
+cluster-forming threshold but replaces it with a soft floor**, and that floor
+is still a choice. It is a milder dependence -- the result is an integral over
+many heights rather than one arbitrary cut -- but it is not literally
+threshold-free at this scale. Measure before committing: the calibration
+driver below reports `bundle_seconds` per candidate on real null data.
+
+#### Calibrating E and H from nulls
+
+`tfce_calibration.py` applies the same discipline the percolation calibration
+established -- read only the held-out calibration rows, never the observed row
+and never an inference row -- to the two exponents TFCE introduces in place of
+the threshold it removes. CUDA runs once with `--store-df`; each candidate
+`(E, H)` then re-integrates the cached sparse edges on CPU.
+
+The gating criterion is the scale-free tail ratio `q99 / median` of the null
+max-TFCE distribution, minimised over the grid: FWER is decided by the extreme
+upper tail, so a good `(E, H)` is one whose tail does not run away from its own
+bulk. `q999/median`, `max/median`, and the Spearman correlation between the
+null maximum and the largest bundle's voxel footprint are reported as
+diagnostics but do not gate -- a high correlation there means the tail is still
+being set by percolation rather than by focal height.
+
+```bash
+.venv/bin/python 02_cudaPerm/tfce_calibration.py \
+  FILELIST PERMUTATIONS CALIB_DIR \
+  --cluster-forming-p 1e-4 --tfce-z-min 4.0 --tfce-z-max 7.0 \
+  --extent-exponents 0.25 0.5 0.75 1.0 --height-exponents 1.0 2.0 3.0 \
+  --calibration-permutations 1000 --bundle-threads 16
+```
+
+Smith & Nichols' `E=0.5, H=2` defaults are the declared starting point and are
+always reported alongside the recommendation, so a move away from them is
+visible rather than implicit.
+
+Correctness: `tfce.py` is the Python oracle (scipy Student-t quantiles, the
+validated strict bundler) and `regression_bundle_tfce.py` holds the backend to
+it -- per-permutation maxima across five `(E, H)` settings, and exact
+per-bundle sums and maxima on unpruned fixtures, which pins down every
+individual edge score rather than just the largest.
+
 ### Long-running jobs
 
 Launch any multi-hour job (calibration batches over a few hundred

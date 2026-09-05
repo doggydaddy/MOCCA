@@ -27,6 +27,7 @@ import csv
 import json
 import math
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -37,6 +38,8 @@ import numpy as np
 import pandas as pd
 
 from bundle_fwer import BundleStatisticResult, compute_bundle_statistics
+import false_discovery
+import tfce as tfce_reference
 from permutation_rows import (
     add_partition_arguments,
     partition_from_args,
@@ -68,6 +71,12 @@ MAXIMA_COLUMNS = (
 GRID_MAXIMA_COLUMNS = (
     "permutation", "observed", "cluster_forming_p", "threshold_index",
     "threshold_edges", "retained_edges", "bundles", "max_statistic",
+)
+# One row per surviving bundle per permutation, written only under --fdr:
+# FWER reads the maxima above, FDR needs the individual bundle statistics.
+BUNDLE_STATISTIC_COLUMNS = (
+    "permutation", "observed", "bundle", "sign", "edge_count", "mass",
+    "statistic",
 )
 
 
@@ -215,6 +224,66 @@ def save_observed(output_dir: Path, result: BundleStatisticResult) -> None:
     ).to_csv(output_dir / "observed_bundles_uncorrected.csv", index=False)
 
 
+def validate_bundle_statistics(
+    statistics: pd.DataFrame, maxima: pd.DataFrame, source: str
+) -> None:
+    """Cross-check the per-bundle file against the maxima file.
+
+    The two are appended in separate steps, so an interrupted run can leave
+    duplicated or missing bundle rows. The ``bundles`` column of the maxima
+    file is an independent record of how many bundles each permutation
+    produced, so it can witness either failure before any p-value is computed.
+    """
+
+    expected = maxima.set_index("permutation")["bundles"].astype(int)
+    actual = statistics.groupby("permutation").size()
+    stray = sorted(set(actual.index) - set(expected.index))
+    if stray:
+        raise RuntimeError(
+            f"{source} holds {len(stray)} permutation(s) absent from the "
+            f"maxima file (first: {stray[0]}). A calibration row must never "
+            "enter the null bundle distribution."
+        )
+    aligned = actual.reindex(expected.index, fill_value=0).to_numpy()
+    if not np.array_equal(aligned, expected.to_numpy()):
+        disagreeing = expected.index[aligned != expected.to_numpy()]
+        raise RuntimeError(
+            f"{len(disagreeing)} permutation(s) in {source} have a bundle-row "
+            f"count disagreeing with the maxima file (first: "
+            f"{int(disagreeing[0])}). The run is inconsistent; delete the file "
+            "and re-run with --resume."
+        )
+
+
+def apply_fdr_correction(
+    observed: pd.DataFrame, null_bundles: np.ndarray, q: float, method: str
+) -> pd.DataFrame:
+    """Attach uncorrected and step-up adjusted p-values to the observed bundles.
+
+    Both BH and BY columns are always written; ``method`` only decides which
+    one drives ``significant``.
+    """
+
+    observed = observed.copy()
+    if not len(observed):
+        observed["null_bundle_exceedances"] = pd.Series(dtype=int)
+        observed["p_uncorrected"] = pd.Series(dtype=float)
+        observed["p_fdr_bh"] = pd.Series(dtype=float)
+        observed["p_fdr_by"] = pd.Series(dtype=float)
+        observed["significant"] = pd.Series(dtype=bool)
+        return observed
+    exceedances, p_uncorrected = false_discovery.pooled_null_p_values(
+        observed["statistic"].to_numpy(float), null_bundles
+    )
+    observed["null_bundle_exceedances"] = exceedances
+    observed["p_uncorrected"] = p_uncorrected
+    observed["p_fdr_bh"] = false_discovery.benjamini_hochberg(p_uncorrected)
+    observed["p_fdr_by"] = false_discovery.benjamini_yekutieli(p_uncorrected)
+    reported = observed["p_fdr_bh" if method == "bh" else "p_fdr_by"]
+    observed["significant"] = (reported <= q).to_numpy()
+    return observed
+
+
 def count_nonempty_lines(path: Path) -> int:
     with path.open() as stream:
         return sum(bool(line.strip()) for line in stream)
@@ -247,7 +316,58 @@ def parse_args() -> argparse.Namespace:
         "--null-permutations", type=int, default=None,
         help=argparse.SUPPRESS,  # removed; see the error raised in main()
     )
-    parser.add_argument("--statistic", choices=("mass", "extent"), default="mass")
+    correction_group = parser.add_mutually_exclusive_group()
+    correction_group.add_argument(
+        "--fwer", dest="correction", action="store_const", const="fwer",
+        help=("control the family-wise error rate against the permutation "
+              "distribution of the maximum bundle statistic (default)"),
+    )
+    correction_group.add_argument(
+        "--fdr", dest="correction", action="store_const", const="fdr",
+        help=("control the false discovery rate across bundles against the "
+              "pooled permutation distribution of individual bundle "
+              "statistics; a weaker guarantee than --fwer"),
+    )
+    parser.set_defaults(correction="fwer")
+    parser.add_argument(
+        "--fdr-q", type=float, default=0.05,
+        help="target false discovery rate for --fdr (default 0.05)",
+    )
+    parser.add_argument(
+        "--fdr-method", choices=("bh", "by"), default="bh",
+        help=("which adjustment decides the reported significant column; both "
+              "Benjamini-Hochberg and Benjamini-Yekutieli columns are always "
+              "written. bh (default) assumes positive dependence; by is valid "
+              "under arbitrary dependence"),
+    )
+    parser.add_argument(
+        "--statistic", choices=("mass", "extent", "tfce"), default="mass",
+        help=("bundle statistic. mass and extent are thresholded at a single "
+              "cluster-forming p; tfce integrates over a grid of heights "
+              "instead, so no single threshold decides the result"),
+    )
+    parser.add_argument(
+        "--tfce-extent-exponent", type=float, default=0.5, metavar="E",
+        help="TFCE extent exponent E over distinct voxels (default 0.5)",
+    )
+    parser.add_argument(
+        "--tfce-height-exponent", type=float, default=2.0, metavar="H",
+        help="TFCE height exponent H over z-equivalent height (default 2.0)",
+    )
+    parser.add_argument(
+        "--tfce-z-min", type=float, default=4.0,
+        help=("lowest z-equivalent integration height. Drives cost sharply: "
+              "every height below it multiplies both the retained edge count "
+              "and the per-height bundling work (default 4.0, p~6.3e-5)"),
+    )
+    parser.add_argument(
+        "--tfce-z-max", type=float, default=7.0,
+        help="highest z-equivalent integration height (default 7.0)",
+    )
+    parser.add_argument(
+        "--tfce-z-step", type=float, default=0.1,
+        help="integration step dz (default 0.1)",
+    )
     parser.add_argument("--neighbor-dist", type=float, default=1.0)
     parser.add_argument("--min-size", type=int, default=10)
     parser.add_argument("--min-cluster-voxels", type=int, default=6)
@@ -325,6 +445,46 @@ def main() -> int:
         )
     if args.bundle_method == "bounded" and args.bundle_engine != "cpp":
         raise ValueError("Bounded bundles require --bundle-engine cpp.")
+    tfce_mode = args.statistic == "tfce"
+    if tfce_mode:
+        if grid_mode or args.cluster_forming_p is None:
+            raise ValueError(
+                "--statistic tfce requires --cluster-forming-p and cannot be "
+                "combined with --cluster-forming-p-grid: TFCE integrates over "
+                "its own height grid, and --cluster-forming-p only says how "
+                "liberally the sparse edges were stored."
+            )
+        if args.bundle_engine != "cpp":
+            raise ValueError(
+                "--statistic tfce requires --bundle-engine cpp; the Python "
+                "oracle in tfce.py is a reference implementation used by "
+                "regression_bundle_tfce.py, not a production engine."
+            )
+        # z_grid validates the geometry (positive step, ordered bounds) with
+        # exactly the backend's rules, so both agree on what is degenerate.
+        heights = tfce_reference.z_grid(
+            args.tfce_z_min, args.tfce_z_max, args.tfce_z_step
+        )
+        floor_p = float(tfce_reference.two_sided_p_from_z(args.tfce_z_min))
+        if args.cluster_forming_p < floor_p:
+            raise ValueError(
+                f"--cluster-forming-p {args.cluster_forming_p:g} is stricter "
+                f"than the lowest integration height z={args.tfce_z_min:g} "
+                f"(p={floor_p:.3g}), so the sparse edges would not reach the "
+                "bottom of the grid and the integral would be silently "
+                "truncated. Store the edges at or below the floor's p, or "
+                "raise --tfce-z-min."
+            )
+    fdr_mode = args.correction == "fdr"
+    if fdr_mode and grid_mode:
+        raise ValueError(
+            "--fdr cannot be combined with --cluster-forming-p-grid: the grid "
+            "correction is a family-wise permutation min-p over thresholds, "
+            "which has no false-discovery-rate analogue here. Calibrate a "
+            "single --cluster-forming-p first, then run --fdr against it."
+        )
+    if fdr_mode and not (0 < args.fdr_q < 1 and math.isfinite(args.fdr_q)):
+        raise ValueError("--fdr-q must be finite and strictly between 0 and 1.")
 
     filelist = args.filelist.resolve()
     permutations = args.permutations.resolve()
@@ -428,7 +588,34 @@ def main() -> int:
         "cluster_forming_p": args.cluster_forming_p,
         "cluster_forming_p_grid": threshold_grid,
         "grid_correction": "symmetric_permutation_min_p" if grid_mode else None,
+        "correction": args.correction,
+        "correction_note": (
+            "false discovery rate across bundles; each observed bundle is "
+            "ranked against the pooled null distribution of individual bundle "
+            "statistics, then adjusted step-up"
+            if fdr_mode
+            else "family-wise error rate; each observed bundle is ranked "
+            "against the null distribution of per-permutation maxima"
+        ),
+        "fdr_q": args.fdr_q if fdr_mode else None,
+        "fdr_method": args.fdr_method if fdr_mode else None,
         "statistic": args.statistic,
+        "statistic_note": (
+            "threshold-free cluster enhancement over the edge graph: per-edge "
+            "sum of extent^E * z^H * dz, extent counted as distinct voxels, "
+            "height as the z-equivalent of the edge's two-sided p. Pruning is "
+            "not applied during integration, only to the reported bundles, so "
+            "the permutation maximum is the unpruned one."
+            if tfce_mode
+            else "single-threshold bundle statistic"
+        ),
+        "tfce_extent_exponent": args.tfce_extent_exponent if tfce_mode else None,
+        "tfce_height_exponent": args.tfce_height_exponent if tfce_mode else None,
+        "tfce_z_min": args.tfce_z_min if tfce_mode else None,
+        "tfce_z_max": args.tfce_z_max if tfce_mode else None,
+        "tfce_z_step": args.tfce_z_step if tfce_mode else None,
+        "tfce_heights": int(len(heights)) if tfce_mode else None,
+        "tfce_sparse_storage_p": args.cluster_forming_p if tfce_mode else None,
         "neighbor_dist": args.neighbor_dist,
         "min_size": args.min_size,
         "min_cluster_voxels": args.min_cluster_voxels,
@@ -449,6 +636,7 @@ def main() -> int:
         "permutation_bundle_maxima_grid.csv" if grid_mode
         else "permutation_bundle_maxima.csv"
     )
+    statistics_path = output_dir / "permutation_bundle_statistics.csv"
     if config_path.exists():
         previous = json.loads(config_path.read_text())
         if not args.resume:
@@ -458,6 +646,10 @@ def main() -> int:
     else:
         if maxima_path.exists():
             raise FileExistsError(f"Untracked maxima file already exists: {maxima_path}")
+        if statistics_path.exists():
+            raise FileExistsError(
+                f"Untracked bundle-statistics file already exists: {statistics_path}"
+            )
         config_path.write_text(json.dumps(config, indent=2) + "\n")
 
     completed: set[int] = set()
@@ -481,11 +673,28 @@ def main() -> int:
                 "row must never enter the FWER null distribution."
             )
 
+    if fdr_mode and statistics_path.exists():
+        # The two files are appended separately, so a crash in between (or an
+        # interrupted batch that is about to be recomputed) can leave bundle
+        # rows for permutations the maxima file does not yet claim. Those rows
+        # would be duplicated on the retry, so drop them here and let the
+        # recomputed batch write them again.
+        saved = pd.read_csv(statistics_path)
+        resynced = saved.loc[saved["permutation"].astype(int).isin(completed)]
+        if len(resynced) != len(saved):
+            print(
+                f"resume: dropping {len(saved) - len(resynced)} bundle-statistic "
+                "row(s) for permutations absent from the maxima file",
+                flush=True,
+            )
+            resynced.to_csv(statistics_path, index=False)
+
     missing = [index for index in selected_rows if index not in completed]
     sparse_dir = output_dir / "sparse_work"
     sparse_dir.mkdir(exist_ok=True)
     prefix = sparse_dir / "bundle"
     write_header = not maxima_path.exists()
+    write_statistic_header = not statistics_path.exists()
 
     for batch in consecutive_batches(missing, args.batch_size):
         print(
@@ -505,7 +714,7 @@ def main() -> int:
         ]
         if df_aware:
             command.extend(["--cluster-forming-p", str(cluster_forming_value)])
-        if grid_mode:
+        if grid_mode or tfce_mode:
             command.append("--store-df")
         if freedman_lane_plan is not None:
             command.extend(["--freedman-lane", str(freedman_lane_plan)])
@@ -518,6 +727,12 @@ def main() -> int:
         )
 
         rows: list[dict[str, object]]
+        # The C++ engine already writes the bundle rows in the master file's
+        # own format, so its batches are streamed through rather than parsed:
+        # a 10k-permutation run produces millions of rows, which should not be
+        # held in memory as dicts just to be written straight back out.
+        statistic_files: list[Path] = []
+        statistic_rows: list[dict[str, object]] = []
         bundle_started = perf_counter()
         if args.bundle_engine == "cpp":
             rows = []
@@ -550,18 +765,34 @@ def main() -> int:
                     )
                 if df_aware:
                     cpp_command.append("--df-aware")
-                if grid_mode:
+                if grid_mode or tfce_mode:
                     cpp_command.extend(
                         ["--records-contain-df", "--subjects", str(n_subjects)]
                     )
+                if tfce_mode:
+                    cpp_command.extend([
+                        "--tfce-extent-exponent", str(args.tfce_extent_exponent),
+                        "--tfce-height-exponent", str(args.tfce_height_exponent),
+                        "--tfce-z-min", str(args.tfce_z_min),
+                        "--tfce-z-max", str(args.tfce_z_max),
+                        "--tfce-z-step", str(args.tfce_z_step),
+                    ])
                 if args.bundle_method == "bounded":
                     cpp_command.append("--bounded-bundles")
+                cpp_bundles = sparse_dir / (
+                    f"cpp_bundles_{batch[0]:06d}_{batch[-1]:06d}"
+                    f"_{threshold_index:02d}.csv"
+                )
+                if fdr_mode:
+                    cpp_command.extend(["--bundle-statistics", str(cpp_bundles)])
                 if (not args.keep_sparse
                         and threshold_index == len(active_thresholds) - 1):
                     cpp_command.append("--delete-inputs")
                 subprocess.run(cpp_command, check=True)
                 cpp_rows = pd.read_csv(cpp_maxima)
                 cpp_maxima.unlink()
+                if fdr_mode:
+                    statistic_files.append(cpp_bundles)
                 if cpp_rows["permutation"].astype(int).tolist() != batch:
                     raise ValueError("C++ bundle result rows do not match requested batch.")
                 if grid_mode:
@@ -597,6 +828,19 @@ def main() -> int:
                     split_signs=True,
                 )
                 rows.append(result_row(permutation_index, result))
+                if fdr_mode:
+                    statistic_rows.extend(
+                        {
+                            "permutation": permutation_index,
+                            "observed": permutation_index == 0,
+                            "bundle": item.bundle,
+                            "sign": item.sign,
+                            "edge_count": item.edge_count,
+                            "mass": item.mass,
+                            "statistic": item.statistic,
+                        }
+                        for item in result.bundles
+                    )
                 if permutation_index == 0:
                     save_observed(output_dir, result)
                 if not args.keep_sparse:
@@ -608,6 +852,29 @@ def main() -> int:
             f"{bundle_seconds:.3f} seconds",
             flush=True,
         )
+
+        if fdr_mode:
+            # Written before the maxima, so that the maxima file stays the
+            # single marker of what has completed; surplus rows from an
+            # interrupted batch are pruned on resume above.
+            with statistics_path.open("a", newline="") as stream:
+                statistic_writer = csv.DictWriter(
+                    stream, fieldnames=BUNDLE_STATISTIC_COLUMNS
+                )
+                if write_statistic_header:
+                    statistic_writer.writeheader()
+                    write_statistic_header = False
+                statistic_writer.writerows(statistic_rows)
+                for batch_file in statistic_files:
+                    with batch_file.open() as source:
+                        header = source.readline().strip()
+                        if header != ",".join(BUNDLE_STATISTIC_COLUMNS):
+                            raise ValueError(
+                                "Unexpected bundle-statistics header from the "
+                                f"C++ backend: {header}"
+                            )
+                        shutil.copyfileobj(source, stream)
+                    batch_file.unlink()
 
         with maxima_path.open("a", newline="") as stream:
             writer = csv.DictWriter(
@@ -713,6 +980,68 @@ def main() -> int:
             f"partition declares {partition.inference_count} inference "
             "permutations."
         )
+
+    if fdr_mode:
+        statistics = pd.read_csv(statistics_path)
+        validate_bundle_statistics(statistics, maxima, statistics_path.name)
+
+        null_bundles = statistics.loc[
+            statistics["permutation"] > 0, "statistic"
+        ].to_numpy(float)
+        if null_bundles.size == 0:
+            raise RuntimeError(
+                "No null permutation produced a surviving bundle, so there is "
+                "no distribution to rank the observed bundles against. The "
+                "cluster-forming threshold is almost certainly too strict."
+            )
+        np.save(output_dir / "null_bundle_statistics.npy", null_bundles)
+
+        observed = apply_fdr_correction(
+            pd.read_csv(output_dir / "observed_bundles_uncorrected.csv"),
+            null_bundles, args.fdr_q, args.fdr_method,
+        )
+        observed.to_csv(output_dir / "observed_bundles_fdr.csv", index=False)
+
+        summary = {
+            **config,
+            "observed_max_statistic": observed_stat,
+            "null_bundle_permutations": int(partition.inference_count),
+            "null_bundle_count": int(null_bundles.size),
+            "p_uncorrected_formula": (
+                "(1 + #{null bundle statistics >= observed}) / "
+                "(null bundle count + 1)"
+            ),
+            "fdr_adjustment": (
+                "step-up adjusted p-values; bh assumes positive dependence "
+                "(PRDS), by is valid under arbitrary dependence"
+            ),
+            "fdr_reported_method": args.fdr_method,
+            "benjamini_yekutieli_penalty": false_discovery.harmonic_penalty(
+                int(len(observed))
+            ),
+            "minimum_attainable_p_uncorrected": 1 / (null_bundles.size + 1),
+            "observed_bundles": int(len(observed)),
+            "significant_bundles_bh": int(
+                (observed["p_fdr_bh"] <= args.fdr_q).sum()
+            ) if len(observed) else 0,
+            "significant_bundles_by": int(
+                (observed["p_fdr_by"] <= args.fdr_q).sum()
+            ) if len(observed) else 0,
+            "complete": True,
+        }
+        (output_dir / "bundle_fwer_results.json").write_text(
+            json.dumps(summary, indent=2) + "\n"
+        )
+        print(
+            f"FDR q={args.fdr_q} over {len(observed)} observed bundles against "
+            f"{null_bundles.size} null bundles: "
+            f"{summary['significant_bundles_bh']} significant (BH), "
+            f"{summary['significant_bundles_by']} significant (BY); "
+            f"reported column uses {args.fdr_method.upper()}",
+            flush=True,
+        )
+        print(f"Complete: {output_dir / 'observed_bundles_fdr.csv'}", flush=True)
+        return 0
 
     observed_path = output_dir / "observed_bundles_uncorrected.csv"
     observed = pd.read_csv(observed_path)

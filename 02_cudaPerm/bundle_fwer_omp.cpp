@@ -129,6 +129,10 @@ struct Edge {
     float tstat;
     double excess;
     uint32_t label;
+    /* Welch-Satterthwaite residual df for this edge, populated only in
+       df-stored (v3) mode. TFCE needs it because |t| is not comparable across
+       edges with different df; the z-equivalent height is. */
+    float degrees_of_freedom = 0.0f;
 };
 
 
@@ -157,7 +161,72 @@ struct PermutationResult {
     uint64_t largest_bundle_voxels = 0;
     std::vector<Edge> observed_edges;
     std::vector<BundleRow> observed_bundles;
+    /* Every surviving bundle of this permutation, retained only on request
+       (--bundle-statistics).  FWER needs just max_statistic above; FDR needs
+       the pooled null distribution of the individual bundle statistics. */
+    std::vector<BundleRow> all_bundles;
 };
+
+
+/*
+ * Threshold-free cluster enhancement over the edge graph (Smith & Nichols,
+ * NeuroImage 2009;44:83-98), adapted to MOCCA's bundles.
+ *
+ *     TFCE(e) = sum_h  extent(e, h)^E * h^H * dh
+ *
+ * The elements are edges rather than voxels, and the adjacency integrated over
+ * is exactly the one assign_strict_labels() already defines, so the enhanced
+ * statistic is built from the same bundle geometry the rest of the pipeline
+ * uses. Two deliberate choices, both recorded in the analysis decision log:
+ *
+ *  - the height h is the z-equivalent of the edge's two-sided p-value, not
+ *    |t|, because Welch's df varies per edge and raw |t| is therefore not
+ *    comparable across the map;
+ *  - extent is the count of distinct voxels the bundle touches, not its edge
+ *    count. A densely connected region of V voxels carries ~V^2/2 edges, so an
+ *    edge-count extent would raise the effective exponent and re-import the
+ *    giant-component domination TFCE exists to damp.
+ *
+ * No pruning (min_size, min_cluster_voxels, isolated-edge removal) is applied
+ * during the integration: those stages are legibility filters, and are applied
+ * only to the bundles finally reported.
+ */
+struct TfceSettings {
+    bool enabled = false;
+    double extent_exponent = 0.5;   /* E */
+    double height_exponent = 2.0;   /* H */
+    double z_min = 2.0;
+    double z_max = 6.0;
+    double z_step = 0.1;
+};
+
+
+/* Two-sided normal tail: 2 * (1 - Phi(z)), the p-value whose z-equivalent
+   height is z. Used to reuse critical_t_lookup() unchanged for each step. */
+static double two_sided_p_from_z(double z)
+{
+    return std::erfc(z / std::sqrt(2.0));
+}
+
+
+static std::vector<double> tfce_z_grid(const TfceSettings &settings)
+{
+    if (!(settings.z_step > 0.0))
+        throw std::runtime_error("tfce z step must be positive");
+    if (!(settings.z_max > settings.z_min))
+        throw std::runtime_error("tfce z max must exceed z min");
+    if (!(settings.z_min > 0.0))
+        throw std::runtime_error("tfce z min must be positive");
+    if (!(settings.extent_exponent >= 0.0) || !(settings.height_exponent >= 0.0))
+        throw std::runtime_error("tfce exponents must be non-negative");
+    size_t steps = static_cast<size_t>(std::floor(
+        (settings.z_max - settings.z_min) / settings.z_step + 1e-9)) + 1u;
+    std::vector<double> grid(steps);
+    for (size_t index = 0; index < steps; ++index)
+        grid[index] = settings.z_min
+            + static_cast<double>(index) * settings.z_step;
+    return grid;
+}
 
 
 class DisjointSet {
@@ -563,6 +632,105 @@ static uint32_t assign_strict_labels(std::vector<Edge> &edges,
 }
 
 
+/*
+ * Per-edge TFCE score for one effect direction.
+ *
+ * Walks the z grid from the loosest height upwards. At each height the
+ * suprathreshold edges are relabelled with the ordinary strict bundler and
+ * every bundle's distinct-voxel extent is measured, then each surviving edge
+ * accrues extent^E * z^H * dz.
+ *
+ * Distinct voxels cannot be accumulated by summing across a union: two
+ * bundles are separate precisely when they fail the shared-voxel *and*
+ * neighbouring-free-endpoint test of assign_strict_labels(), which does not
+ * stop them touching a voxel in common. So the count is taken per bundle over
+ * its own edges, with a monotonically increasing stamp token standing in for
+ * clearing the per-voxel scratch array between bundles and between steps.
+ */
+static std::vector<double> compute_tfce_scores(
+    const std::vector<Edge> &edges,
+    const MaskGeometry &mask,
+    const std::vector<std::vector<double>> &critical_tables,
+    const std::vector<double> &z_values,
+    const TfceSettings &settings)
+{
+    std::vector<double> scores(edges.size(), 0.0);
+    if (edges.empty())
+        return scores;
+
+    std::vector<Edge> active;
+    std::vector<uint32_t> origin;
+    std::vector<uint64_t> stamp(mask.coordinates.size(), 0);
+    std::vector<uint64_t> offsets;
+    std::vector<uint32_t> by_label;
+    std::vector<uint64_t> voxel_counts;
+    std::vector<double> label_weight;
+    uint64_t token = 0;
+
+    for (size_t step = 0; step < z_values.size(); ++step) {
+        active.clear();
+        origin.clear();
+        for (uint32_t index = 0; index < edges.size(); ++index) {
+            double critical = interpolated_critical_t(
+                static_cast<double>(edges[index].degrees_of_freedom),
+                critical_tables[step]);
+            if (std::fabs(static_cast<double>(edges[index].tstat)) >= critical) {
+                active.push_back(edges[index]);
+                origin.push_back(index);
+            }
+        }
+        /* Each step selects a subset of the one below it, so once nothing
+           survives no higher step can revive anything. */
+        if (active.empty())
+            break;
+
+        Incidence incidence = build_incidence(active, mask.coordinates.size());
+        uint32_t n_labels = assign_strict_labels(active, mask, incidence);
+        if (n_labels == 0)
+            continue;
+
+        offsets.assign(static_cast<size_t>(n_labels) + 1u, 0);
+        for (const Edge &edge : active)
+            offsets[edge.label + 1]++;
+        std::partial_sum(offsets.begin(), offsets.end(), offsets.begin());
+        by_label.resize(active.size());
+        {
+            std::vector<uint64_t> cursor = offsets;
+            for (uint32_t index = 0; index < active.size(); ++index)
+                by_label[cursor[active[index].label]++] = index;
+        }
+
+        voxel_counts.assign(n_labels, 0);
+        for (uint32_t label = 0; label < n_labels; ++label) {
+            ++token;
+            for (uint64_t position = offsets[label];
+                 position < offsets[label + 1]; ++position) {
+                const Edge &edge = active[by_label[position]];
+                if (stamp[edge.endpoint1] != token) {
+                    stamp[edge.endpoint1] = token;
+                    voxel_counts[label]++;
+                }
+                if (stamp[edge.endpoint2] != token) {
+                    stamp[edge.endpoint2] = token;
+                    voxel_counts[label]++;
+                }
+            }
+        }
+
+        double height = std::pow(z_values[step], settings.height_exponent)
+            * settings.z_step;
+        label_weight.assign(n_labels, 0.0);
+        for (uint32_t label = 0; label < n_labels; ++label)
+            label_weight[label] = std::pow(
+                static_cast<double>(voxel_counts[label]),
+                settings.extent_exponent) * height;
+        for (uint32_t index = 0; index < active.size(); ++index)
+            scores[origin[index]] += label_weight[active[index].label];
+    }
+    return scores;
+}
+
+
 static bool within_radius(uint32_t first, uint32_t second,
                           const MaskGeometry &mask)
 {
@@ -846,7 +1014,11 @@ static PermutationResult process_permutation(
     size_t minimum_size,
     size_t minimum_cluster_voxels,
     bool bounded_bundles,
-    bool retain_observed)
+    bool retain_observed,
+    bool retain_all_bundles,
+    const TfceSettings &tfce,
+    const std::vector<std::vector<double>> &tfce_tables,
+    const std::vector<double> &tfce_z_values)
 {
     auto sparse = read_sparse(path);
     const SparseHeader &header = sparse.first;
@@ -885,6 +1057,8 @@ static PermutationResult process_permutation(
             continue;
         Edge edge{
             endpoints.first, endpoints.second, record.tstat, excess, 0,
+            records_contain_df
+                ? static_cast<float>(record.auxiliary) : 0.0f,
         };
         if (record.tstat > 0)
             positive.push_back(edge);
@@ -894,6 +1068,22 @@ static PermutationResult process_permutation(
     records.clear();
     records.shrink_to_fit();
     uint64_t threshold_edge_count = positive.size() + negative.size();
+
+    /* The enhanced score is built from the unpruned edge set, so that the null
+       maximum every bundle is later ranked against is not itself shaped by the
+       legibility filters below. Storing it in `excess` lets it ride through
+       process_sign() with the edge it belongs to. */
+    double tfce_maximum = 0.0;
+    if (tfce.enabled) {
+        for (std::vector<Edge> *side : {&positive, &negative}) {
+            std::vector<double> enhanced = compute_tfce_scores(
+                *side, mask, tfce_tables, tfce_z_values, tfce);
+            for (size_t index = 0; index < side->size(); ++index) {
+                (*side)[index].excess = enhanced[index];
+                tfce_maximum = std::max(tfce_maximum, enhanced[index]);
+            }
+        }
+    }
 
     positive = process_sign(std::move(positive), mask, minimum_size,
                             minimum_cluster_voxels, bounded_bundles);
@@ -916,10 +1106,13 @@ static PermutationResult process_permutation(
         n_bundles = std::max(n_bundles, edge.label + 1);
     std::vector<uint64_t> counts(n_bundles, 0);
     std::vector<double> masses(n_bundles, 0.0);
+    std::vector<double> bundle_maxima(n_bundles, 0.0);
     std::vector<int> signs(n_bundles, 0);
     for (const Edge &edge : combined) {
         counts[edge.label]++;
         masses[edge.label] += static_cast<double>(edge.excess);
+        bundle_maxima[edge.label] = std::max(
+            bundle_maxima[edge.label], static_cast<double>(edge.excess));
         if (signs[edge.label] == 0)
             signs[edge.label] = edge.tstat > 0 ? 1 : -1;
     }
@@ -930,15 +1123,22 @@ static PermutationResult process_permutation(
     result.retained_edges = combined.size();
     result.bundles = n_bundles;
     for (uint32_t label = 0; label < n_bundles; ++label) {
-        double value = statistic == "mass"
-            ? masses[label] : static_cast<double>(counts[label]);
+        double value = statistic == "tfce"
+            ? bundle_maxima[label]
+            : (statistic == "mass"
+                ? masses[label] : static_cast<double>(counts[label]));
         result.max_statistic = std::max(result.max_statistic, value);
-        if (retain_observed) {
-            result.observed_bundles.push_back({
-                label, signs[label], counts[label], masses[label], value,
-            });
-        }
+        const BundleRow row{
+            label, signs[label], counts[label], masses[label], value,
+        };
+        if (retain_observed)
+            result.observed_bundles.push_back(row);
+        if (retain_all_bundles)
+            result.all_bundles.push_back(row);
     }
+
+    if (tfce.enabled)
+        result.max_statistic = tfce_maximum;
 
     if (n_bundles > 0) {
         uint32_t largest_label = static_cast<uint32_t>(
@@ -1044,18 +1244,49 @@ static void write_observed_bundles(const std::string &path,
 }
 
 
+/* Every bundle of every permutation in the batch.  write_maxima() above keeps
+   only the per-permutation maximum, which is all FWER consumes; FDR needs each
+   bundle separately, because the uncorrected p-value of an observed bundle is
+   its rank against the pooled null bundle statistics rather than against the
+   null maxima. */
+static void write_bundle_statistics(
+    const std::string &path,
+    const std::vector<PermutationResult> &results)
+{
+    std::ofstream stream(path);
+    if (!stream)
+        throw std::runtime_error("cannot write bundle statistics: " + path);
+    stream << "permutation,observed,bundle,sign,edge_count,mass,statistic\n";
+    stream << std::setprecision(17);
+    for (const PermutationResult &result : results) {
+        for (const BundleRow &bundle : result.all_bundles) {
+            stream << result.permutation << ','
+                   << (result.permutation == 0 ? "True" : "False") << ','
+                   << bundle.bundle << ',' << bundle.sign << ','
+                   << bundle.edge_count << ',' << bundle.mass << ','
+                   << bundle.statistic << '\n';
+        }
+    }
+    if (!stream)
+        throw std::runtime_error("failed writing bundle statistics: " + path);
+}
+
+
 static void usage(const char *program)
 {
     std::cerr
         << "Usage: " << program
-        << " <mask.dump> <sparse_prefix> <start> <count> <mass|extent>"
+        << " <mask.dump> <sparse_prefix> <start> <count> <mass|extent|tfce>"
         << " <threshold> <neighbor_dist> <min_size> <min_cluster_voxels>"
         << " <maxima.csv>"
         << " [--threads N] [--observed-edges FILE]"
         << " [--observed-bundles FILE] [--df-aware]"
         << " [--records-contain-df --subjects N] [--bounded-bundles]"
         << " [--strict-bundles] [--delete-inputs]"
-        << " [--giant-component-report FILE]\n";
+        << " [--giant-component-report FILE]"
+        << " [--bundle-statistics FILE]"
+        << " [--tfce-extent-exponent E] [--tfce-height-exponent H]"
+        << " [--tfce-z-min Z] [--tfce-z-max Z] [--tfce-z-step DZ]\n";
 }
 
 
@@ -1081,6 +1312,8 @@ int main(int argc, char **argv)
         std::string observed_edges_path;
         std::string observed_bundles_path;
         std::string giant_component_report_path;
+        std::string bundle_statistics_path;
+        TfceSettings tfce;
         bool delete_inputs = false;
         bool df_aware = false;
         bool records_contain_df = false;
@@ -1105,6 +1338,26 @@ int main(int argc, char **argv)
             } else if (std::strcmp(argv[argument], "--giant-component-report") == 0
                     && argument + 1 < argc) {
                 giant_component_report_path = argv[++argument];
+            } else if (std::strcmp(argv[argument], "--bundle-statistics") == 0
+                    && argument + 1 < argc) {
+                bundle_statistics_path = argv[++argument];
+            } else if (std::strcmp(argv[argument], "--tfce-extent-exponent") == 0
+                    && argument + 1 < argc) {
+                tfce.extent_exponent = parse_double(
+                    argv[++argument], "tfce-extent-exponent");
+            } else if (std::strcmp(argv[argument], "--tfce-height-exponent") == 0
+                    && argument + 1 < argc) {
+                tfce.height_exponent = parse_double(
+                    argv[++argument], "tfce-height-exponent");
+            } else if (std::strcmp(argv[argument], "--tfce-z-min") == 0
+                    && argument + 1 < argc) {
+                tfce.z_min = parse_double(argv[++argument], "tfce-z-min");
+            } else if (std::strcmp(argv[argument], "--tfce-z-max") == 0
+                    && argument + 1 < argc) {
+                tfce.z_max = parse_double(argv[++argument], "tfce-z-max");
+            } else if (std::strcmp(argv[argument], "--tfce-z-step") == 0
+                    && argument + 1 < argc) {
+                tfce.z_step = parse_double(argv[++argument], "tfce-z-step");
             } else if (std::strcmp(argv[argument], "--delete-inputs") == 0) {
                 delete_inputs = true;
             } else if (std::strcmp(argv[argument], "--df-aware") == 0) {
@@ -1127,8 +1380,15 @@ int main(int argc, char **argv)
         if (count == 0 || minimum_size == 0
                 || minimum_cluster_voxels == 0 || threads < 1)
             throw std::runtime_error("count, sizes, and threads must be positive");
-        if (statistic != "mass" && statistic != "extent")
-            throw std::runtime_error("statistic must be mass or extent");
+        if (statistic != "mass" && statistic != "extent"
+                && statistic != "tfce")
+            throw std::runtime_error(
+                "statistic must be mass, extent or tfce");
+        tfce.enabled = statistic == "tfce";
+        if (tfce.enabled && !records_contain_df)
+            throw std::runtime_error(
+                "tfce requires --records-contain-df: every edge needs its own "
+                "residual df to be placed on the shared z-equivalent scale");
         if (neighbour_dist < 0)
             throw std::runtime_error("neighbor_dist must be non-negative");
         if (cluster_forming_threshold < 0)
@@ -1143,6 +1403,27 @@ int main(int argc, char **argv)
         omp_set_num_threads(threads);
         MaskGeometry mask = load_mask(mask_path, neighbour_dist);
         std::vector<double> critical_t_values;
+        std::vector<double> tfce_z_values;
+        std::vector<std::vector<double>> tfce_tables;
+        if (tfce.enabled) {
+            tfce_z_values = tfce_z_grid(tfce);
+            /* Selecting edges at the loosest integration height is exactly
+               thresholding at its two-sided p, so the existing df-aware
+               machinery is reused rather than duplicated: the positional
+               threshold argument is overridden here and plays no part. */
+            cluster_forming_threshold = two_sided_p_from_z(tfce.z_min);
+            tfce_tables.reserve(tfce_z_values.size());
+            for (double z : tfce_z_values)
+                tfce_tables.push_back(critical_t_lookup(
+                    n_subjects, two_sided_p_from_z(z)));
+            std::cerr << "tfce: E=" << tfce.extent_exponent
+                      << " H=" << tfce.height_exponent
+                      << " z=" << tfce.z_min << ".." << tfce.z_max
+                      << " step " << tfce.z_step
+                      << " (" << tfce_z_values.size() << " heights, "
+                      << "edges selected at p<=" << cluster_forming_threshold
+                      << ")" << std::endl;
+        }
         if (records_contain_df)
             critical_t_values = critical_t_lookup(
                 n_subjects, cluster_forming_threshold);
@@ -1166,7 +1447,9 @@ int main(int argc, char **argv)
                     df_aware, records_contain_df,
                     critical_t_values,
                     minimum_size, minimum_cluster_voxels,
-                    bounded_bundles, observed);
+                    bounded_bundles, observed,
+                    !bundle_statistics_path.empty(),
+                    tfce, tfce_tables, tfce_z_values);
                 if (results[static_cast<size_t>(local)].permutation
                         != permutation)
                     throw std::runtime_error("sparse permutation index mismatch");
@@ -1191,6 +1474,8 @@ int main(int argc, char **argv)
             throw std::runtime_error(failure_message);
 
         write_maxima(maxima_path, results);
+        if (!bundle_statistics_path.empty())
+            write_bundle_statistics(bundle_statistics_path, results);
         if (!giant_component_report_path.empty())
             write_giant_component_report(
                 giant_component_report_path, results, mask.coordinates.size());
