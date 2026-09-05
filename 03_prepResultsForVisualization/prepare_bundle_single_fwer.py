@@ -250,7 +250,7 @@ def main() -> int:
         )
         + f"Cluster-forming threshold: p_CF={config['cluster_forming_p']:g}, "
         "chosen by null-only percolation calibration prior to inference "
-        "(see percolation_calibration.py / conversation_archives_2026-08-26.md).\n\n"
+        "(see percolation_calibration.py / conversation_archives_2026-08-26.md in analysis_notes/).\n\n"
         "Open `04_coffee-dac/pyqt_launcher.py`, select the CSV file that does "
         "**not** end in `_v2_processed.csv`, then choose **Load existing v2 "
         "results (fast)**. The accompanying processed CSV already contains the "

@@ -5,6 +5,7 @@ __pycache__/
 04_coffee-dac/data
 04_coffee-dac/results
 .vscode/settings.json
+manuscript/
 
 test*
 sim*
@@ -42,5 +43,4 @@ templates/
 # Root-level environment snapshot (project uses 04_coffee-dac/requirements.txt)
 /requirements.txt
 
-# Local conversation records (may contain machine paths and working notes)
-/conversation_archives_*.md
+# Conversation archives now live in analysis_notes/ (tracked, not ignored).

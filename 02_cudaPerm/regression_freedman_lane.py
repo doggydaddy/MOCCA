@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the covariate-adjusted Freedman--Lane implementation.
 
-Covers the requirements in ``manuscript/ANALYSIS_DECISIONS.md`` (2026-09-02,
+Covers the requirements in ``analysis_notes/ANALYSIS_DECISIONS.md`` (2026-09-02,
 "covariate-adjusted control--TLE analysis"):
 
 - the studentized statistic stays heteroscedasticity-robust, and reduces to

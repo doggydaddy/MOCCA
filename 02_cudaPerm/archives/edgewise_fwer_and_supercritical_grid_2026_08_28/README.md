@@ -4,7 +4,7 @@ Archived on 2026-08-28. These are two distinct, now-abandoned approaches from
 the path that led to the current bundle-level, percolation-calibrated FWER
 pipeline (see `02_cudaPerm/README.md`). Both are statistically valid for what
 they compute; neither is part of the recommended workflow any more. Full
-narrative in `conversation_archives_2026-08-26.md` at the repo root.
+narrative in `conversation_archives_2026-08-26.md` in `analysis_notes/`.
 
 ## 1. Edgewise max-statistic FWER
 

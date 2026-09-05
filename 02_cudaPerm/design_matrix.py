@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and validate the participant-level design matrix for the adjusted model.
 
-Per ``manuscript/ANALYSIS_DECISIONS.md`` (2026-09-02, "covariate-adjusted
+Per ``analysis_notes/ANALYSIS_DECISIONS.md`` (2026-09-02, "covariate-adjusted
 control--TLE analysis"), the minimal primary model for participant ``i`` and
 edge ``e`` is::
 

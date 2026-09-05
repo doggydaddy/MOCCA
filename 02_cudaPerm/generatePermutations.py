@@ -4,7 +4,7 @@
 Row 0 is always the observed grouping (``range(nA)``: the first ``nA`` filelist
 entries are group A).  Rows 1.. are unique random label permutations,
 partitioned into a calibration-only range and an inference-only range that
-never overlap -- see ``manuscript/ANALYSIS_DECISIONS.md`` (2026-09-02,
+never overlap -- see ``analysis_notes/ANALYSIS_DECISIONS.md`` (2026-09-02,
 "disjoint calibration and inference permutations")::
 
     row 0             observed assignment

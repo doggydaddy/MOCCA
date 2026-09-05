@@ -49,7 +49,7 @@ default partition it uses rows 1..1000 only, while run_bundle_fwer.py uses row
 0 plus rows 1001..11000; the two null subsets are disjoint, so a label
 assignment that helped choose the threshold can never also contribute to the
 FWER null distribution. See permutation_rows.py and
-manuscript/ANALYSIS_DECISIONS.md (2026-09-02, "disjoint calibration and
+analysis_notes/ANALYSIS_DECISIONS.md (2026-09-02, "disjoint calibration and
 inference permutations").
 
 One thousand calibration rows give roughly 50 observations in the upper 5%

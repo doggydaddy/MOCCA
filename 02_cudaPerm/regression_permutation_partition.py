@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the disjoint calibration/inference row partition.
 
-`manuscript/ANALYSIS_DECISIONS.md` (2026-09-02, "disjoint calibration and
+`analysis_notes/ANALYSIS_DECISIONS.md` (2026-09-02, "disjoint calibration and
 inference permutations") requires automated validation to reject overlapping
 row ranges, duplicate rows where uniqueness is required, a non-observed row 0,
 an incorrect total row count, and off-by-one errors in either subset -- and a

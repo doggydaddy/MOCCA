@@ -2,7 +2,7 @@
 """Covariate-adjusted Freedman--Lane permutation inference for the group term.
 
 Implements the nuisance-aware permutation scheme required by
-``manuscript/ANALYSIS_DECISIONS.md`` (2026-09-02, "covariate-adjusted
+``analysis_notes/ANALYSIS_DECISIONS.md`` (2026-09-02, "covariate-adjusted
 control--TLE analysis"):
 
 1. Let ``Z = [intercept, centered age, sex]`` and fit the reduced nuisance

@@ -13,8 +13,8 @@
 >   see that archive's README for why.
 >
 > Full project narrative, including the reasoning behind every design
-> decision below, is in `conversation_archives_2026-08-26.md` at the repo
-> root.
+> decision below, is in `conversation_archives_2026-08-26.md` in
+> `analysis_notes/`.
 
 This module performs connection-wise (edgewise) Welch permutation testing
 between two subject groups over an atlas-free voxel-to-voxel connectivity
@@ -446,7 +446,7 @@ point).
 ## Covariate-adjusted Freedman--Lane model
 
 > **Status: implemented end to end and validated on GPU; not yet run in
-> production.** See `manuscript/ANALYSIS_DECISIONS.md` (2026-09-02,
+> production.** See `analysis_notes/ANALYSIS_DECISIONS.md` (2026-09-02,
 > "covariate-adjusted control--TLE analysis").
 
 The completed control--TLE analysis permutes group labels with no
@@ -805,7 +805,7 @@ bitwise, so the two scales can be compared without an implementation change
 confounding the comparison. It also emits a per-file provenance sidecar and a
 run manifest. It is implemented and validated but **not yet run in
 production** — see `01p5_FisherCC/README.md` and the decision log in
-`manuscript/ANALYSIS_DECISIONS.md`. Note that a switch to Fisher `z`
+`analysis_notes/ANALYSIS_DECISIONS.md`. Note that a switch to Fisher `z`
 invalidates the existing `p_CF = 5e-6` calibration, which was measured on
 raw-`r` participant matrices; `percolation_calibration.py` must be rerun
 before any inference on Fisher `z` inputs.

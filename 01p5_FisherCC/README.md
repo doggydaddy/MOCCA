@@ -1,7 +1,7 @@
 # 01p5_FisherCC — Fisher transform and participant aggregation
 
 > **Status: implemented, validated, not yet run in production.**
-> `manuscript/ANALYSIS_DECISIONS.md` (2026-09-02, "optional Fisher-transform
+> `analysis_notes/ANALYSIS_DECISIONS.md` (2026-09-02, "optional Fisher-transform
 > and participant-aggregation stage") accepts this stage in principle but
 > defers the production rerun until the nuisance-adjusted model, the
 > disjoint calibration/inference permutation design, and the remaining

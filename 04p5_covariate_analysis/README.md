@@ -6,7 +6,7 @@ part of the production pipeline in `02_cudaPerm/`. It is kept separate for
 that reason: none of it should be mistaken for a step that produces a primary
 result.
 
-Findings are written up in `manuscript/ANALYSIS_DECISIONS.md` (2026-09-04,
+Findings are written up in `analysis_notes/ANALYSIS_DECISIONS.md` (2026-09-04,
 "which covariate removes the effect") and
 `manuscript/APPENDIX_COVARIATE_ADJUSTED_ANALYSIS.md` §§3.6–3.8.
 

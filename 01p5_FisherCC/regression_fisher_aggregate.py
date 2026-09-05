@@ -2,7 +2,7 @@
 """Regression tests for the 01p5_FisherCC participant-aggregation stage.
 
 These cover the validation requirements recorded in
-``manuscript/ANALYSIS_DECISIONS.md`` for this stage:
+``analysis_notes/ANALYSIS_DECISIONS.md`` for this stage:
 
 1. transform and aggregation against a small float64 reference;
 2. invariance to processing chunk size and run-file order;

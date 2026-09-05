@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Disjoint calibration/inference partition of one master permutation file.
 
-Per ``manuscript/ANALYSIS_DECISIONS.md`` (2026-09-02, "disjoint calibration
+Per ``analysis_notes/ANALYSIS_DECISIONS.md`` (2026-09-02, "disjoint calibration
 and inference permutations"), a production analysis described as using 10,000
 inference permutations generates 11,000 unique null permutations plus the
 observed assignment, partitioned as::
@@ -174,7 +174,7 @@ def add_partition_arguments(
     group = parser.add_argument_group(
         "permutation row partition",
         "Disjoint calibration/inference split of the master permutation file "
-        "(see manuscript/ANALYSIS_DECISIONS.md, 2026-09-02).",
+        "(see analysis_notes/ANALYSIS_DECISIONS.md, 2026-09-02).",
     )
     group.add_argument(
         "--calibration-permutations",
