@@ -4,6 +4,8 @@ import numpy as np
 import pyvista as pv
 from matplotlib.colors import ListedColormap
 from PyQt5.QtWidgets import QApplication
+from pyvista.plotting.tools import create_axes_orientation_box
+from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget
 
 from mocca_gui.colormap import my_colormap
 from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
@@ -14,6 +16,14 @@ CENTROID_OPACITY_MAX = 1.0
 CENTROID_WIDTH_MIN_MULT = 1.0
 CENTROID_WIDTH_MAX_MULT = 3.0
 CENTROID_WIDTH_MAX_ABS = 12.0
+
+# The bundled brain3mm template is in voxel-index space with LAS axis codes:
+# increasing I/J/K point Left/Anterior/Superior, respectively.
+ANATOMICAL_ORIENTATION_LABELS = {
+    "x_plus": "L", "x_minus": "R",
+    "y_plus": "A", "y_minus": "P",
+    "z_plus": "S", "z_minus": "I",
+}
 
 def plotline_ijk(plotter, edge, color, offset_multiplier=1.0, line_width=3, opacity=0.8):
     a = edge[0:3]
@@ -39,6 +49,63 @@ def add_endpoints(plotter, edge, color, size_scale=1.0, opacity=0.2):
     glyphs = points.glyph(geom=geom, scale=False, factor=np.sqrt(3)/4 * size_scale * 2)
     actor = plotter.add_mesh(glyphs, color=color[:3], opacity=opacity)
     return actor
+
+
+def plotlines_ijk_batch(plotter, edges, color, offset_multiplier=1.0, line_width=3,
+                        opacity=0.8, cancel_check=None):
+    '''
+    Batched replacement for calling plotline_ijk() once per edge in `edges`.
+
+    Builds the exact same per-edge curved spline as plotline_ijk (same
+    offset/midpoint, same pv.Spline call -- the curve shape is unchanged),
+    but merges every edge's spline into ONE PolyData and adds a SINGLE
+    actor, instead of one VTK actor per edge. Rendering a full (non-
+    centroid) bundle of thousands of edges as thousands of separate actors
+    is what makes that view slow -- each add_mesh() call pays real,
+    non-negligible VTK actor/mapper construction overhead, and the renderer
+    then has to traverse every one of those actors on every subsequent
+    frame. Collapsing them into one actor removes that per-edge overhead
+    without changing what gets drawn.
+
+    Returns None if there are no edges, or if `cancel_check` reports a
+    cancellation partway through building the per-edge splines (cheap to
+    check here since spline generation is the only per-edge step left).
+    '''
+    if len(edges) == 0:
+        return None
+    splines = []
+    for edge in edges:
+        if cancel_check and cancel_check():
+            return None
+        a = edge[0:3]
+        b = edge[3:6]
+        offset = (np.abs(a - b) * 0.1 * offset_multiplier)
+        m = ((a + b) / 2) + offset
+        spline_points = np.vstack((a, m, b))
+        splines.append(pv.Spline(spline_points, 32))
+    merged = splines[0] if len(splines) == 1 else pv.merge(splines, merge_points=False)
+    return plotter.add_mesh(
+        merged,
+        color=color[:3],
+        line_width=line_width,
+        render_lines_as_tubes=True,
+        opacity=opacity,
+    )
+
+
+def add_endpoints_batch(plotter, edges, color, size_scale=1.0, opacity=0.2):
+    '''
+    Batched replacement for calling add_endpoints() once per edge in
+    `edges`: glyphs every endpoint of every edge in one call and adds a
+    SINGLE actor, instead of one glyph mesh + one actor per edge.
+    '''
+    if len(edges) == 0:
+        return None
+    points = np.vstack([edges[:, 0:3], edges[:, 3:6]])
+    cloud = pv.PolyData(points)
+    geom = pv.Box(bounds=[-0.5, 0.5, -0.5, 0.5, -0.5, 0.5])
+    glyphs = cloud.glyph(geom=geom, scale=False, factor=np.sqrt(3)/4 * size_scale * 2)
+    return plotter.add_mesh(glyphs, color=color[:3], opacity=opacity)
 
 def _align_bundle_endpoint_orientation(edges_bundle):
     """
@@ -166,16 +233,65 @@ class NetworkPlotter:
         self.endpoint_sizes = {}
 
         self.bundle_colors = {}  # Key: (fcn, bundle) → color index
+        # Direct RGBA overrides are used by reproducible publication exports,
+        # which need a fixed colorblind-safe palette independent of GUI indices.
+        self.bundle_rgba_overrides = {}
         self.centroid_flags = {}  # (fcn, bundle) → True/False
+        self.centroid_count_range = None  # optional fixed (min_count, max_count)
         self.opacities = {}  # (fcn, bundle) → float
         self.brain_opacity_scale = 1.0  # slider at 100% = full base opacities
         self.wm_visible = True          # WM layer toggle
+        self.last_selection = []        # geometry represented by the live scene
+        self.last_endpoint_visible = True
 
         # Add brain meshes once and keep their actors for live opacity updates
         self._live_brain_actors = []
         self._add_brain_meshes()
+        self._orientation_widget = None
+        self._add_anatomical_orientation_marker()
         # Separate list tracking only edge/glyph actors added during draw_selection
         self._edge_actors = []
+
+    def _add_anatomical_orientation_marker(self):
+        """Add a camera-linked LAS orientation cube to every rendered view."""
+        if self._orientation_widget is not None:
+            return True
+        actor = create_axes_orientation_box(
+            edge_color="black",
+            label_color="black",
+            color_box=False,
+            opacity=0.85,
+            show_text_edges=True,
+        )
+        actor.SetXPlusFaceText(ANATOMICAL_ORIENTATION_LABELS["x_plus"])
+        actor.SetXMinusFaceText(ANATOMICAL_ORIENTATION_LABELS["x_minus"])
+        actor.SetYPlusFaceText(ANATOMICAL_ORIENTATION_LABELS["y_plus"])
+        actor.SetYMinusFaceText(ANATOMICAL_ORIENTATION_LABELS["y_minus"])
+        actor.SetZPlusFaceText(ANATOMICAL_ORIENTATION_LABELS["z_plus"])
+        actor.SetZMinusFaceText(ANATOMICAL_ORIENTATION_LABELS["z_minus"])
+        try:
+            if getattr(self.plotter, "iren", None) is None:
+                # pyvistaqt.QtInteractor is itself the VTK interactor and does
+                # not populate PyVista's ``iren`` wrapper used by
+                # add_orientation_widget.
+                widget = vtkOrientationMarkerWidget()
+                widget.SetOrientationMarker(actor)
+                widget.SetInteractor(self.plotter)
+                widget.SetCurrentRenderer(self.plotter.renderer)
+                widget.SetViewport(0.0, 0.0, 0.14, 0.14)
+                widget.SetEnabled(1)
+                widget.SetInteractive(False)
+                self._orientation_widget = widget
+            else:
+                self._orientation_widget = self.plotter.add_orientation_widget(
+                    actor,
+                    interactive=False,
+                    viewport=(0.0, 0.0, 0.14, 0.14),
+                )
+        except (AttributeError, RuntimeError, TypeError):
+            self._orientation_widget = None
+            return False
+        return True
 
     def _add_brain_meshes(self):
         """Add brain mesh layers to the plotter and store the returned actors."""
@@ -228,7 +344,23 @@ class NetworkPlotter:
         for actor in self._edge_actors:
             self.plotter.remove_actor(actor)
         self._edge_actors = []
+        self.last_selection = []
         self.plotter.render()
+
+    def resolve_bundle_color(self, fcn, bundle):
+        """Resolve direct, bundle-index, FCN-index, then default color state."""
+        color = self.bundle_rgba_overrides.get((fcn, int(bundle)))
+        if color is None:
+            color = self.bundle_rgba_overrides.get((fcn, "All"))
+        if color is not None:
+            return color
+
+        idx = self.bundle_colors.get((fcn, int(bundle)))
+        if idx is None:
+            idx = self.bundle_colors.get((fcn, "All"))
+        if idx is not None:
+            return my_colormap.colors[idx]
+        return my_colormap.colors[fcn % len(my_colormap.colors)]
 
     def draw_selection(
         self,
@@ -293,7 +425,11 @@ class NetworkPlotter:
                 if edge_count > 0:
                     centroid_bundle_counts.append(edge_count)
 
-        if centroid_bundle_counts:
+        if self.centroid_count_range is not None:
+            fixed_min, fixed_max = self.centroid_count_range
+            centroid_log_min = float(np.log1p(max(float(fixed_min), 0.0)))
+            centroid_log_max = float(np.log1p(max(float(fixed_max), 0.0)))
+        elif centroid_bundle_counts:
             centroid_log_counts = np.log1p(np.asarray(centroid_bundle_counts, dtype=np.float64))
             centroid_log_min = float(np.min(centroid_log_counts))
             centroid_log_max = float(np.max(centroid_log_counts))
@@ -319,18 +455,7 @@ class NetworkPlotter:
                 if plotting_cancelled():
                     return False
 
-                # check bundle color first, then FCN-wide color
-                idx = self.bundle_colors.get((fcn, int(b)))
-
-                if idx is None:
-                    idx = self.bundle_colors.get((fcn, 'All'))
-
-                if idx is not None:
-                    color = my_colormap.colors[idx]
-                else:
-                    color = my_colormap.colors[fcn % len(my_colormap.colors)]
-                    #color_list = np.array([
-                #"""more contrasted FCN-colors:"""" color = np.array([[153/255, 0.0, 0.0, 1.0], [0.0, 153/255, 0.0, 1.0], [0.0, 0.0, 153/255, 1.0], [255/255, 128/255, 0.0, 1.0],[128/255, 0.0, 255/255, 1.0]])
+                color = self.resolve_bundle_color(fcn, b)
                 
                 # Get centroid toggle state
                 use_centroid = self.centroid_flags.get((fcn, int(b)), False)
@@ -375,7 +500,7 @@ class NetworkPlotter:
                     # generate centroid edge
                     centroid_edge, boxes = generate_centroid_edge(
                         edges,
-                        plotter=self.plotter,
+                        plotter=self.plotter if endpoint_visible else None,
                         color=color
                     )
                     self._edge_actors.extend(boxes)
@@ -397,45 +522,60 @@ class NetworkPlotter:
                         progress_callback(percent)
 
                 else:
+                    # Full (non-centroid) edges: draw every edge of this
+                    # bundle/network as ONE merged actor instead of one VTK
+                    # actor per edge -- per-edge add_mesh() calls are what
+                    # make this view slow at realistic bundle sizes (a
+                    # significant bundle can have thousands of edges), since
+                    # actor/mapper construction and per-frame scene traversal
+                    # cost is paid per actor, not per edge drawn. The curve
+                    # shape and endpoint glyphs are identical to the old
+                    # per-edge loop -- only how many actors they're packed
+                    # into changes. See plotlines_ijk_batch/add_endpoints_batch.
+                    if plotting_cancelled():
+                        return False
 
-                    for edge in edges:
-                        if plotting_cancelled():
-                            return False
+                    thickness = self.thicknesses.get((fcn, int(b)), 3)
+                    curvature = self.curvatures.get((fcn, int(b)), 1.0)
+                    endpoint_size = self.endpoint_sizes.get((fcn, int(b)), 1.0)
+                    opacity = self.opacities.get((fcn, int(b)), 0.8)
 
-                        thickness = self.thicknesses.get((fcn, int(b)), 3)
-                        curvature = self.curvatures.get((fcn, int(b)), 1.0)
-                        endpoint_size = self.endpoint_sizes.get((fcn, int(b)), 1.0)
-
-                        actor = plotline_ijk(
-                            self.plotter,
-                            edge,
-                            color=color,
-                            offset_multiplier=curvature,
-                            line_width=thickness,
-                            opacity=self.opacities.get((fcn, int(b)), 0.8)
-                        )
+                    actor = plotlines_ijk_batch(
+                        self.plotter,
+                        edges,
+                        color=color,
+                        offset_multiplier=curvature,
+                        line_width=thickness,
+                        opacity=opacity,
+                        cancel_check=plotting_cancelled,
+                    )
+                    if actor is None and plotting_cancelled():
+                        return False
+                    if actor is not None:
                         self._edge_actors.append(actor)
 
-                        if endpoint_visible:
-                            ep_actor = add_endpoints(
-                                self.plotter,
-                                edge,
-                                color=color,
-                                size_scale=endpoint_size,
-                                opacity=self.opacities.get((fcn, int(b)), 0.8)
-                            )
+                    if endpoint_visible:
+                        ep_actor = add_endpoints_batch(
+                            self.plotter,
+                            edges,
+                            color=color,
+                            size_scale=endpoint_size,
+                            opacity=opacity,
+                        )
+                        if ep_actor is not None:
                             self._edge_actors.append(ep_actor)
 
-                        edges_drawn += 1
+                    edges_drawn += len(edges)
 
-                        # Updating the progress value less frequently avoids
-                        # unnecessary dialog repaints. Cancellation is checked
-                        # above for every edge.
-                        if edges_drawn % 10 == 0:
-                            if progress_callback:
-                                percent = int((edges_drawn / total_edges) * 100)
-                                progress_callback(percent)
+                    if plotting_cancelled():
+                        return False
+                    if progress_callback:
+                        percent = int((edges_drawn / total_edges) * 100)
+                        progress_callback(percent)
 
         self.plotter.reset_camera()
+        self._add_anatomical_orientation_marker()
         self.plotter.render()
+        self.last_selection = [dict(item) for item in selection]
+        self.last_endpoint_visible = bool(endpoint_visible)
         return True

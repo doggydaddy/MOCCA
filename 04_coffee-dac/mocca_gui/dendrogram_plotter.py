@@ -111,6 +111,20 @@ def show_dendrogram(
     for tick, color in zip(tick_labels, ordered_leaf_colors):
         tick.set_color(color)
 
+    # A leaf whose bundle/network has only one member never gets a colored
+    # link: its only merge is, by construction, the one where it joins a
+    # DIFFERENT cluster above the cut line (that's what makes it a
+    # singleton), so link_color_func legitimately greys that merge out --
+    # there is no below-threshold, single-color segment belonging to it for
+    # scipy to draw. Mark each leaf's own color at its base explicitly so a
+    # singleton bundle/network is still visible even though its connecting
+    # line is grey.
+    tick_positions = [tick.get_position()[0] for tick in tick_labels]
+    ax.scatter(
+        tick_positions, [0] * len(tick_positions),
+        color=ordered_leaf_colors, s=20, zorder=5, clip_on=False,
+    )
+
     plt.title(title)
     plt.xlabel("Bundles")
     plt.ylabel("Distance")

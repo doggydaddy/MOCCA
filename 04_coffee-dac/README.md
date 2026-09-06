@@ -1,5 +1,11 @@
 # GUI for COFFEE-DAC
 
+> **Publication exports:** the GUI provides standardized manuscript panels,
+> endpoint-density maps, full-edge supplements, summaries, captions, and
+> provenance manifests, alongside a simple current-view export. Vector
+> dendrograms and MP4 supplements remain on the roadmap in
+> `PUBLICATION_EXPORT_ROADMAP.md`.
+
 A Graphic User Interface for COFFEE-DAC, a part of the MOCCA pipeline for
 analysis of resting-state fMRI data.
 
@@ -195,6 +201,43 @@ order to hinder distortion and lagging. If you want to see the animation of the
 GIF before exporting it, press "Live preview". The mouse does not contribute to
 the angle adjustments of the plot in the GIF-animation, adjustments are made by
 the slider. "Export All GIFs" will export one GIF of each FCN all at once.
+
+## Export a publication figure
+
+After plotting, use **Export Figure** beside **Export GIF**. Choose
+**Publication Set** for the manuscript-oriented export, or **Current View** for
+the original single-camera prototype.
+
+Publication Set creates a new timestamped directory under the folder you
+choose. It contains:
+
+- a 7-inch-wide, 600-dpi row per selected parent bundle with standardized
+  left-lateral, superior/dorsal, right-lateral, and endpoint-density panels;
+- assembled PNG and PDF figures;
+- separate full-edge triptychs and endpoint-density PNGs;
+- raw endpoint incidence CSVs and `bundle_summary.csv`;
+- consolidated captions and `publication_export_manifest.json` with camera,
+  palette, rendering, checksum, source-inference, and software provenance.
+
+The 3D panels use equal orthographic scale and fixed export styling. Display
+subdivisions can preserve the current GUI bundle/FCN colors (the default, so
+static figures match GIF exports) or use a fixed color-vision-deficiency-safe
+Okabe-Ito palette. The selected mode and resolved RGBA values are recorded in
+the manifest and remain fixed across every output in the set. The endpoint
+panel shows raw incident-edge counts as a superior-inferior anatomical MIP.
+Where an upstream FWER manifest is available, bundle mass, corrected p-value,
+effect label, correction method, and alpha are carried into the summary and
+caption. Otherwise the exporter leaves their inferential interpretation
+explicitly unavailable instead of guessing.
+
+Current View preserves the interactive camera. PNG and TIFF use a 7-inch-wide,
+600-dpi source render and tight crop; PDF and SVG use VTK's graphics export
+path, with 3D actors rasterized inside the vector container. It also writes a
+plain-text caption and JSON provenance sidecar.
+
+For v3 data, parent-bundle inference is recorded separately from the post hoc
+display subdivisions, and the required warning that subdivisions were not
+tested independently is included in both the caption and metadata.
 
 ## Dendrogram
 

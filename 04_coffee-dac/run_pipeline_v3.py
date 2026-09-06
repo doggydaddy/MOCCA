@@ -64,8 +64,22 @@ from coffee_dac_pipeline_v3 import (
     save_result_v3,
     recut_subbundles,
 )
-from coffee_dac_pipeline import BUNDLE_COL
+from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
 import numpy as np
+
+
+def _parse_per_parent_overrides(pairs):
+    '''Parse repeated "PARENT_ID:N" strings into {parent_id: n}.'''
+    overrides = {}
+    for pair in pairs or []:
+        try:
+            parent_str, count_str = pair.split(':', 1)
+            overrides[int(parent_str)] = int(count_str)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"expected 'PARENT_ID:N', got '{pair}'"
+            )
+    return overrides
 
 
 def make_progress_callback():
@@ -111,7 +125,22 @@ def build_parser():
         type=int,
         default=2,
         metavar='N',
-        help='Target number of sub-bundles to divide the input edges into.',
+        help='Default target number of sub-bundles for every parent '
+             '(inferential) bundle in the input. A single visualization '
+             'export can contain more than one independently FWER-'
+             'significant bundle; each is subdivided by its own '
+             'independent edge-linkage tree (see coffee_dac_pipeline_v3.py) '
+             'and never mixed with another parent bundle.',
+    )
+    p.add_argument(
+        '--bundles-for',
+        action='append',
+        metavar='PARENT_ID:N',
+        help='Override the sub-bundle count for one parent bundle, e.g. '
+             '"94:3". Repeatable. Parent bundle ids are whatever is in the '
+             'bundle/network columns of the input (or its sibling '
+             '_v2_processed.csv) -- see the printed "parent bundle" summary '
+             'from a first run to find them.',
     )
     p.add_argument(
         '--h1-flag',
@@ -146,9 +175,19 @@ def build_parser():
         type=int,
         default=None,
         metavar='N',
-        help='Re-cut an existing cached result into N sub-bundles without '
-             're-running the full pipeline. Requires a v3 cache to exist. '
-             'Overwrites the processed CSV with updated sub-bundle labels.',
+        help='Re-cut an existing cached result: N sub-bundles for every '
+             'parent bundle by default (override individual parents with '
+             '--recut-for), without re-running the full pipeline. Requires '
+             'a v3 cache to exist. Overwrites the processed CSV with '
+             'updated sub-bundle labels.',
+    )
+    p.add_argument(
+        '--recut-for',
+        action='append',
+        metavar='PARENT_ID:N',
+        help='Override the re-cut sub-bundle count for one parent bundle, '
+             'e.g. "94:3". Repeatable. Requires --recut to also be given '
+             '(as the default for any parent not listed here).',
     )
     p.add_argument(
         '--allow-processed-input',
@@ -181,40 +220,63 @@ def main():
     default_csv, default_npy = get_cache_paths_v3(input_csv)
     output_csv = default_csv if args.output is None else os.path.abspath(args.output)
 
-    if args.recut is not None:
+    if args.recut is not None or args.recut_for:
         if not cache_exists_v3(input_csv):
-            print('ERROR: --recut requires an existing v3 cache. '
-                  'Run the pipeline first.', file=sys.stderr)
+            print('ERROR: --recut/--recut-for requires an existing v3 '
+                  'cache. Run the pipeline first.', file=sys.stderr)
             sys.exit(1)
-        print(f'Re-cutting cached result into {args.recut} sub-bundle(s)...')
+        recut_overrides = _parse_per_parent_overrides(args.recut_for)
+        if recut_overrides and args.recut is None:
+            print('ERROR: --recut-for requires --recut to also be given, '
+                  'as the default for any parent bundle not listed.',
+                  file=sys.stderr)
+            sys.exit(2)
+        default_recut = args.recut if args.recut is not None else 2
+        print(f'Re-cutting cached result (default {default_recut} '
+              f'sub-bundle(s) per parent bundle'
+              + (f', overrides: {recut_overrides}' if recut_overrides else '')
+              + ')...')
         cached = load_cached_result_v3(input_csv)
-        edges_out, nr_out = recut_subbundles(
-            cached['edges_net'], cached['linkage_matrix'], args.recut
+        requested = recut_overrides if recut_overrides else default_recut
+        edges_out, nr_out_map = recut_subbundles(
+            cached['edges_net'], cached['linkage_matrices'], requested,
+            default_nr_bundles=default_recut,
         )
         cached['edges_net'] = edges_out
-        cached['nr_bundles_out'] = nr_out
+        cached['nr_bundles_out'] = nr_out_map
         save_result_v3(
             input_csv,
             cached,
             invocation='cli',
             recut={
-                'requested_bundles': args.recut,
-                'actual_bundles': nr_out,
+                'requested_bundles': {
+                    pid: recut_overrides.get(pid, default_recut)
+                    for pid in nr_out_map
+                },
+                'actual_bundles': nr_out_map,
             },
         )
-        print(f'  -> {nr_out} sub-bundle(s) saved to {default_csv}')
+        for parent_id, nr_out in sorted(nr_out_map.items()):
+            print(f'  -> parent bundle {parent_id}: {nr_out} sub-bundle(s)')
+        print(f'  saved to {default_csv}')
         return
+
+    bundle_overrides = _parse_per_parent_overrides(args.bundles_for)
+    nr_bundles = bundle_overrides if bundle_overrides else int(args.bundles)
 
     print(f'Input        : {input_csv}')
     print(f'Output       : {output_csv}')
-    print(f'bundles      : {args.bundles}')
+    print(f'bundles      : {args.bundles} (default per parent bundle)')
+    if bundle_overrides:
+        print(f'bundles-for  : {bundle_overrides}')
     print(f'h1_flag      : {args.h1_flag}')
     print(f'method       : {args.method}')
     print(f'max_exact    : {args.max_exact}')
     print()
 
     expected_parameters = {
-        'nr_bundles': int(args.bundles),
+        'nr_bundles': nr_bundles,
+        'default_nr_bundles': int(args.bundles),
         'h1_flag': args.h1_flag,
         'method': args.method,
         'max_exact': int(args.max_exact),
@@ -239,7 +301,8 @@ def main():
 
         result = process_edge_data_v3(
             input_csv,
-            nr_bundles=args.bundles,
+            nr_bundles=nr_bundles,
+            default_nr_bundles=int(args.bundles),
             h1_flag=args.h1_flag,
             method=args.method,
             max_exact=args.max_exact,
@@ -260,15 +323,24 @@ def main():
 
     edges_net = result['edges_net']
     n_edges = edges_net.shape[0]
-    n_bundles = result.get(
-        'nr_bundles_out',
-        len(np.unique(edges_net[:, BUNDLE_COL])) if n_edges else 0,
-    )
+    nr_bundles_out = result.get('nr_bundles_out')
+    if not nr_bundles_out and n_edges:
+        # Loaded from a legacy/plain cache dict without nr_bundles_out --
+        # derive it per parent bundle directly from the edge array.
+        nr_bundles_out = {
+            int(parent_id): len(np.unique(
+                edges_net[edges_net[:, NETWORK_COL] == parent_id, BUNDLE_COL]
+            ))
+            for parent_id in np.unique(edges_net[:, NETWORK_COL])
+        }
+    nr_bundles_out = nr_bundles_out or {}
 
     print()
     print('-' * 52)
     print(f'  Input/output edges : {n_edges:,}')
-    print(f'  Sub-bundles         : {n_bundles}')
+    print(f'  Parent bundles     : {len(nr_bundles_out)}')
+    for parent_id, nr_out in sorted(nr_bundles_out.items()):
+        print(f'    parent {parent_id}: {nr_out} sub-bundle(s)')
     print('-' * 52)
     print(f'  Output CSV  -> {output_csv}')
 

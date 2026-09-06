@@ -10,12 +10,14 @@ from coffee_dac_pipeline_v2 import (
     process_edge_data_v2,
     cache_exists_v2,
     load_cached_result_v2,
+    load_params_v2,
     recut_networks,
 )
 from coffee_dac_pipeline_v3 import (
     process_edge_data_v3,
     cache_exists_v3,
     load_cached_result_v3,
+    load_params_v3,
     recut_subbundles,
 )
 
@@ -48,11 +50,15 @@ class EdgeDataLoaderWorker(QThread):
         v3_kwargs  : dict or None  – extra keyword arguments forwarded to
                      process_edge_data_v3 (e.g. nr_bundles, h1_flag …)
                      Ignored when pipeline != 'v3' or use_cache=True.
-        recut      : int or None  – if set and pipeline='v2', re-cut the
-                     loaded result into this many networks using the cached
-                     linkage matrix (instant, no reprocessing needed). If set
-                     and pipeline='v3', re-cut into this many sub-bundles
-                     instead, same instant mechanism one level down.
+        recut      : int, dict, or None  – if set and pipeline='v2', re-cut
+                     the loaded result into this many networks using the
+                     cached linkage matrix (instant, no reprocessing
+                     needed). If set and pipeline='v3', re-cut into this
+                     many sub-bundles instead, same instant mechanism one
+                     level down -- independently per parent (inferential)
+                     bundle. A v3 recut may be a single int (applied to
+                     every parent bundle) or a dict {parent_bundle_id: n}
+                     for independent per-parent sub-bundle counts.
         '''
         super().__init__()
         self.file_path   = file_path
@@ -69,11 +75,11 @@ class EdgeDataLoaderWorker(QThread):
                 result = load_cached_result_v3(self.file_path)
                 self.progress.emit(80)
                 if self.recut is not None:
-                    edges_out, nr_out = recut_subbundles(
-                        result['edges_net'], result['linkage_matrix'], self.recut
+                    edges_out, nr_out_map = recut_subbundles(
+                        result['edges_net'], result['linkage_matrices'], self.recut
                     )
                     result['edges_net'] = edges_out
-                    result['nr_bundles_out'] = nr_out
+                    result['nr_bundles_out'] = nr_out_map
                 self.progress.emit(100)
             else:
                 result = process_edge_data_v3(
@@ -113,4 +119,10 @@ class EdgeDataLoaderWorker(QThread):
                     progress_callback=self.progress.emit,
                 )
         result['pipeline'] = self.pipeline
+        result['input_path'] = self.file_path
+        if 'provenance' not in result:
+            if self.pipeline == 'v2':
+                result['provenance'] = load_params_v2(self.file_path)
+            elif self.pipeline == 'v3':
+                result['provenance'] = load_params_v3(self.file_path)
         self.finished.emit(result)

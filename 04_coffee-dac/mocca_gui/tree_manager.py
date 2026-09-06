@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from coffee_dac_pipeline import BUNDLE_COL, NETWORK_COL
+from mocca_gui.colormap import my_colormap
 
 class TreeManager:
     def __init__(self, main_window):
@@ -96,7 +97,7 @@ class TreeManager:
             # Set background color if defined
             idx = self.main_window.plotter.bundle_colors.get((fcn, 'All'))
             if idx is not None:
-                rgba = self.main_window.plotter.color_options[idx]
+                rgba = my_colormap.colors[idx]
                 color_btn.setStyleSheet(
                     f"background-color: rgba({int(rgba[0]*255)}, {int(rgba[1]*255)}, {int(rgba[2]*255)}, {rgba[3]});"
                 )
@@ -133,7 +134,7 @@ class TreeManager:
 
                 idx = self.main_window.plotter.bundle_colors.get((fcn, bundle))
                 if idx is not None:
-                    rgba = self.main_window.plotter.color_options[idx]
+                    rgba = my_colormap.colors[idx]
                     color_btn.setStyleSheet(
                         f"background-color: rgba({int(rgba[0]*255)}, {int(rgba[1]*255)}, {int(rgba[2]*255)}, {rgba[3]});"
                     )

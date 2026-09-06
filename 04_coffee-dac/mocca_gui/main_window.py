@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QSplitter, QPushButton,
     QHBoxLayout, QLabel, QCheckBox, QSlider, QFileDialog, QMessageBox,
     QProgressDialog, QDialog, QVBoxLayout, QComboBox, QDialogButtonBox,
-    QColorDialog, QSpinBox
+    QColorDialog, QSpinBox, QApplication, QFormLayout, QScrollArea
 )
 from PyQt5.QtGui import QPixmap, QColor, QIcon
 from PyQt5.QtCore import Qt, QTimer
@@ -16,6 +16,13 @@ from mocca_gui.tree_manager import TreeManager
 from mocca_gui.fine_tuner import FineTuner
 from mocca_gui.data_loader import EdgeDataLoader
 from mocca_gui.gif_exporter import GifExporter
+from mocca_gui.figure_exporter import FigureExporter
+from mocca_gui.publication_exporter import (
+    COLOR_MODE_GUI,
+    COLOR_MODE_PUBLICATION,
+    PublicationExporter,
+    ExportCancelled,
+)
 from mocca_gui.dendrogram_plotter import show_dendrogram
 from mocca_gui.plot_worker import PlotWorker
 from mocca_gui.data_loader import EdgeDataLoaderWorker
@@ -102,6 +109,14 @@ class MainWindow(QMainWindow):
         export_btn.clicked.connect(self.export_gif_dialog)
         controls_layout.addWidget(export_btn)
 
+        export_figure_btn = QPushButton("Export Figure")
+        export_figure_btn.setToolTip(
+            "Export the current camera view at publication resolution with "
+            "caption and provenance metadata"
+        )
+        export_figure_btn.clicked.connect(self.export_figure_dialog)
+        controls_layout.addWidget(export_figure_btn)
+
         export_all_btn = QPushButton("Export All GIFs")
         export_all_btn.clicked.connect(self.export_all_gifs)
         controls_layout.addWidget(export_all_btn)
@@ -128,6 +143,11 @@ class MainWindow(QMainWindow):
 
         self.data_loader = EdgeDataLoader(self)
         self.gif_exporter = GifExporter()
+        self.figure_exporter = FigureExporter()
+        self.publication_exporter = PublicationExporter()
+        self.loaded_data_path = None
+        self.loaded_pipeline = None
+        self.loaded_provenance = None
 
         splitter.setSizes([700, 300])
 
@@ -204,6 +224,13 @@ class MainWindow(QMainWindow):
                 if v3_manifest is not None:
                     params = v3_manifest.get('parameters') or {}
                     results = v3_manifest.get('results') or {}
+                    parent_bundles = results.get('parent_bundles') or []
+                    parent_lines = "\n".join(
+                        f"      parent {entry.get('parent_bundle_id', '?')}: "
+                        f"{entry.get('edge_count', '?')} edges -> "
+                        f"{entry.get('subdivisions', '?')} sub-bundle(s)"
+                        for entry in parent_bundles
+                    )
                     cache_info.append(
                         "    Recorded parameters: "
                         f"nr-bundles={params.get('nr_bundles', '?')}, "
@@ -211,8 +238,9 @@ class MainWindow(QMainWindow):
                         f"method={params.get('method', '?')}\n"
                         "    Result: "
                         f"{results.get('retained_edges', '?')} edges, "
-                        f"{results.get('bundles', '?')} sub-bundles\n"
-                        "    Completed: "
+                        f"{results.get('parent_bundle_count', '?')} parent bundle(s)\n"
+                        + (parent_lines + "\n" if parent_lines else "")
+                        + "    Completed: "
                         f"{v3_manifest.get('completed_at', 'unknown')}"
                     )
                 else:
@@ -273,10 +301,12 @@ class MainWindow(QMainWindow):
             combo.addItem("Re-process with pipeline v1 (slow)", ("v1", False))
             layout.addWidget(combo)
 
-            # Recut spinbox — relevant when loading a v2 (networks) or v3
-            # (sub-bundles) cache. Same underlying "cut the cached tree at a
-            # different size" mechanism in both cases; only the label and
-            # which column gets rewritten differ.
+            # Recut controls — relevant when loading a v2 (networks) or v3
+            # (sub-bundles) cache. v2 cuts the whole cached tree at one size;
+            # v3 cuts one INDEPENDENT tree per parent (inferential) bundle,
+            # so each parent bundle gets its own spinbox -- a small parent
+            # bundle may only need 2 sub-bundles to read clearly while a
+            # much larger one needs 6 (see coffee_dac_pipeline_v3.py).
             recut_widget = QWidget(dialog)
             recut_layout = QHBoxLayout(recut_widget)
             recut_layout.setContentsMargins(0, 0, 0, 0)
@@ -295,26 +325,56 @@ class MainWindow(QMainWindow):
             recut_layout.addWidget(recut_spin)
             layout.addWidget(recut_widget)
 
-            recorded_bundles = (
-                (v3_manifest or {}).get('results', {}).get('bundles', 2)
+            recorded_parent_bundles = (
+                (v3_manifest or {}).get('results', {}).get('parent_bundles') or []
             )
-            try:
-                recorded_bundles = int(recorded_bundles)
-            except (TypeError, ValueError):
-                recorded_bundles = 2
+            v3_recut_widget = QWidget(dialog)
+            v3_recut_form = QFormLayout(v3_recut_widget)
+            v3_recut_spins = {}
+            if recorded_parent_bundles:
+                for entry in recorded_parent_bundles:
+                    parent_id = int(entry.get('parent_bundle_id', 0))
+                    try:
+                        recorded_n = max(2, min(50, int(entry.get('subdivisions', 2))))
+                    except (TypeError, ValueError):
+                        recorded_n = 2
+                    spin = QSpinBox(dialog)
+                    spin.setRange(1, 50)
+                    spin.setValue(recorded_n)
+                    v3_recut_spins[parent_id] = spin
+                    v3_recut_form.addRow(
+                        f"Parent bundle {parent_id} "
+                        f"({entry.get('edge_count', '?')} edges) -> N sub-bundles:",
+                        spin,
+                    )
+            else:
+                # Legacy cache with no per-parent breakdown recorded: fall
+                # back to one spinbox applied uniformly to every parent
+                # bundle present (recut_subbundles accepts a plain int).
+                spin = QSpinBox(dialog)
+                spin.setRange(2, 50)
+                spin.setValue(2)
+                v3_recut_spins[None] = spin
+                v3_recut_form.addRow("Cut every bundle into N sub-bundles:", spin)
+            v3_recut_scroll = QScrollArea(dialog)
+            v3_recut_scroll.setWidget(v3_recut_widget)
+            v3_recut_scroll.setWidgetResizable(True)
+            v3_recut_scroll.setMaximumHeight(200)
+            layout.addWidget(v3_recut_scroll)
 
             def update_recut_visibility():
                 choice_pipeline, choice_cache = combo.currentData()
                 if choice_pipeline == 'v3' and choice_cache:
-                    recut_label.setText("Cut this bundle into N sub-bundles (v3 divisive):")
-                    recut_spin.setValue(max(2, min(50, recorded_bundles)))
-                    recut_widget.setVisible(True)
+                    recut_widget.setVisible(False)
+                    v3_recut_scroll.setVisible(True)
                 elif choice_pipeline == 'v2' and choice_cache:
                     recut_label.setText("Cut into N networks (v2 cache only):")
                     recut_spin.setValue(max(2, min(50, recorded_networks)))
                     recut_widget.setVisible(True)
+                    v3_recut_scroll.setVisible(False)
                 else:
                     recut_widget.setVisible(False)
+                    v3_recut_scroll.setVisible(False)
             combo.currentIndexChanged.connect(update_recut_visibility)
             update_recut_visibility()
 
@@ -327,8 +387,16 @@ class MainWindow(QMainWindow):
                 return
 
             pipeline, use_cache = combo.currentData()
-            if pipeline in ('v2', 'v3') and use_cache:
+            if pipeline == 'v2' and use_cache:
                 recut = recut_spin.value()
+            elif pipeline == 'v3' and use_cache:
+                if None in v3_recut_spins:
+                    recut = v3_recut_spins[None].value()
+                else:
+                    recut = {
+                        parent_id: spin.value()
+                        for parent_id, spin in v3_recut_spins.items()
+                    }
         else:
             # No cache at all — default to v2 processing
             pipeline = 'v2'
@@ -356,7 +424,14 @@ class MainWindow(QMainWindow):
 
     def on_data_loaded(self, result):
         self.edges_net = result['edges_net']
+        self.loaded_data_path = result.get('input_path')
+        self.loaded_pipeline = result.get('pipeline')
+        self.loaded_provenance = result.get('provenance')
         self.linkage_matrix = result.get('linkage_matrix')
+        # v3: one independent linkage tree PER PARENT bundle (see
+        # coffee_dac_pipeline_v3.py), keyed by parent (NETWORK_COL) id --
+        # never a single tree spanning every parent bundle.
+        self.linkage_matrices = result.get('linkage_matrices')
         # v3 (divisive) builds one linkage leaf per EDGE, since it clusters
         # individual edges directly rather than bundles; v1/v2 build one
         # leaf per BUNDLE. The dendrogram view needs to know which, since it
@@ -662,6 +737,173 @@ class MainWindow(QMainWindow):
             )
             QMessageBox.information(self, "Done", f"GIF saved:\n{filename}")
 
+    def export_figure_dialog(self):
+        if (
+            self.edges_net is None
+            or not self.plotter._edge_actors
+            or not self.plotter.last_selection
+        ):
+            QMessageBox.warning(
+                self, "Nothing plotted", "Plot a selection before exporting a figure."
+            )
+            return
+
+        chooser = QMessageBox(self)
+        chooser.setWindowTitle("Export Figure")
+        chooser.setIcon(QMessageBox.Information)
+        chooser.setText("Choose the figure export type.")
+        chooser.setInformativeText(
+            "Publication Set creates standardized lateral/dorsal views, an "
+            "endpoint-density panel, full-edge supplements, summary CSV, "
+            "captions, and a reproducibility manifest."
+        )
+        publication_button = chooser.addButton(
+            "Publication Set", QMessageBox.AcceptRole
+        )
+        current_button = chooser.addButton(
+            "Current View", QMessageBox.ActionRole
+        )
+        chooser.addButton(QMessageBox.Cancel)
+        chooser.setDefaultButton(publication_button)
+        chooser.exec_()
+
+        if chooser.clickedButton() is publication_button:
+            self.export_publication_set_dialog()
+        elif chooser.clickedButton() is current_button:
+            self.export_current_view_dialog()
+
+    def export_current_view_dialog(self):
+
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Publication Figure",
+            "publication_figure.png",
+            (
+                "PNG Figure (*.png);;TIFF Figure (*.tif *.tiff);;"
+                "PDF Figure (*.pdf);;SVG Figure (*.svg)"
+            ),
+        )
+        if not filename:
+            return
+        if not os.path.splitext(filename)[1]:
+            extension_by_filter = {
+                "PNG Figure (*.png)": ".png",
+                "TIFF Figure (*.tif *.tiff)": ".tif",
+                "PDF Figure (*.pdf)": ".pdf",
+                "SVG Figure (*.svg)": ".svg",
+            }
+            filename += extension_by_filter.get(selected_filter, ".png")
+
+        try:
+            outputs = self.figure_exporter.export(
+                filename=filename,
+                network_plotter=self.plotter,
+                edges_net=self.edges_net,
+                pipeline=self.loaded_pipeline,
+                input_path=self.loaded_data_path,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Figure export failed", f"Could not export the figure:\n{exc}"
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Figure Exported",
+            "Publication figure and sidecars saved:\n\n"
+            f"Figure: {outputs['figure']}\n"
+            f"Caption: {outputs['caption']}\n"
+            f"Metadata: {outputs['metadata']}",
+        )
+
+    def export_publication_set_dialog(self):
+        palette_chooser = QMessageBox(self)
+        palette_chooser.setWindowTitle("Publication Set Colors")
+        palette_chooser.setIcon(QMessageBox.Question)
+        palette_chooser.setText("Choose how bundle and network colors are exported.")
+        palette_chooser.setInformativeText(
+            "Current GUI colors preserves the colors shown in the viewer and "
+            "GIF exports. Standardized palette uses the color-vision-deficiency-"
+            "safe Okabe-Ito publication palette."
+        )
+        gui_colors_button = palette_chooser.addButton(
+            "Current GUI Colors", QMessageBox.AcceptRole
+        )
+        publication_colors_button = palette_chooser.addButton(
+            "Standardized Palette", QMessageBox.ActionRole
+        )
+        palette_chooser.addButton(QMessageBox.Cancel)
+        palette_chooser.setDefaultButton(gui_colors_button)
+        palette_chooser.exec_()
+
+        if palette_chooser.clickedButton() is gui_colors_button:
+            color_mode = COLOR_MODE_GUI
+        elif palette_chooser.clickedButton() is publication_colors_button:
+            color_mode = COLOR_MODE_PUBLICATION
+        else:
+            return
+
+        parent_directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select folder for the new timestamped publication export",
+        )
+        if not parent_directory:
+            return
+
+        progress = QProgressDialog(
+            "Creating standardized publication figures...", "Cancel", 0, 100, self
+        )
+        progress.setWindowTitle("Publication Export")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        cancelled = [False]
+        progress.canceled.connect(lambda: cancelled.__setitem__(0, True))
+
+        def update_progress(value):
+            progress.setValue(value)
+            QApplication.processEvents()
+
+        try:
+            outputs = self.publication_exporter.export(
+                output_parent=parent_directory,
+                network_plotter=self.plotter,
+                edges_net=self.edges_net,
+                pipeline=self.loaded_pipeline,
+                input_path=self.loaded_data_path,
+                provenance=self.loaded_provenance,
+                progress_callback=update_progress,
+                stop_flag=lambda: cancelled[0],
+                color_mode=color_mode,
+            )
+        except ExportCancelled:
+            QMessageBox.information(
+                self, "Export Cancelled", "No publication export folder was created."
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Publication export failed",
+                f"Could not create the publication export set:\n{exc}",
+            )
+            return
+        finally:
+            progress.close()
+
+        QMessageBox.information(
+            self,
+            "Publication Set Exported",
+            "Publication export created:\n\n"
+            f"Folder: {outputs['directory']}\n"
+            f"Main figure: {outputs['figure_png']}\n"
+            f"PDF: {outputs['figure_pdf']}\n"
+            f"Summary: {outputs['summary']}\n"
+            f"Manifest: {outputs['manifest']}\n"
+            f"Colors: {'current GUI colors' if color_mode == COLOR_MODE_GUI else 'standardized palette'}",
+        )
+
     def export_all_gifs(self):
         # Placeholder for your export_all_networks code
         dir_path = QFileDialog.getExistingDirectory(self, "Select folder to save GIFs")
@@ -804,16 +1046,12 @@ class MainWindow(QMainWindow):
 
     # ---------------- Dendrogram Plotting ------------------------
 
-    def prepare_dendrogram_plot_data(self):
+    def _prepare_dendrogram_panel(self, edges_net, Z, per_edge_leaves, title):
         import numpy as np
         from mocca_gui.colormap import my_colormap
 
-        edges_net = self.edges_net
-        Z = self.linkage_matrix
-        per_edge_leaves = getattr(self, 'dendrogram_leaves', 'bundles') == 'edges'
-
-        # get number of FCNs
-        num_fcns = int(np.max(edges_net[:, NETWORK_COL])) + 1
+        # get number of FCNs present in this panel's edges
+        num_fcns = len(np.unique(edges_net[:, NETWORK_COL]))
 
         def find_nth_largest_link(Z, n):
             # Z[:, 2] contains the distances of the merges
@@ -824,11 +1062,12 @@ class MainWindow(QMainWindow):
             nth_distance = sorted_distances[n - 1]
             return nth_distance
 
-        # Get unique bundles (for v3 these are sub-bundles of one FWER bundle)
+        # Get unique bundles (for v3 these are the sub-bundles of ONE parent
+        # bundle -- this panel's edges already belong to a single parent).
         unique_bundles = np.unique(edges_net[:, BUNDLE_COL])
 
         # Pick cut distance based on the current number of FCNs (v1/v2) or
-        # sub-bundles (v3) in edges_net.
+        # sub-bundles (v3) in this panel.
         # (Previously hardcoded to 5, which could disagree with current recut.)
         num_cuts = len(unique_bundles) if per_edge_leaves else num_fcns
         cut_distance = find_nth_largest_link(Z, num_cuts)
@@ -851,7 +1090,7 @@ class MainWindow(QMainWindow):
             # v3: Z has one leaf per EDGE, not per bundle -- label each leaf
             # by the sub-bundle *that specific edge* was cut into, and
             # truncate the display (scipy collapses deep subtrees into
-            # count-labeled nodes) since a dataset can have tens of
+            # count-labeled nodes) since a parent bundle can have tens of
             # thousands of edges/leaves, far too many to render individually.
             bundle_col_values = edges_net[:, BUNDLE_COL].astype(int)
             fcn_col_values = edges_net[:, NETWORK_COL].astype(int)
@@ -910,11 +1149,12 @@ class MainWindow(QMainWindow):
                 if hasattr(color_arr, "tolist")
                 else tuple(color_arr)
             )
-    
+
             fcn_to_color[fcn] = color_tuple
 
-
         return {
+            "Z": Z,
+            "title": title,
             "labels": labels,
             "cut_distance": cut_distance,
             "fcn_to_color": fcn_to_color,
@@ -923,24 +1163,64 @@ class MainWindow(QMainWindow):
             "truncate_kwargs": truncate_kwargs,
         }
 
+    def prepare_dendrogram_plot_data(self):
+        '''
+        Returns a list of panel dicts, one per dendrogram to display. v1/v2
+        always produce exactly one panel (a single tree spanning every
+        bundle). v3 produces one panel PER PARENT bundle, since each parent
+        bundle has its own independent edge-linkage tree (see
+        coffee_dac_pipeline_v3.py) -- these are never combined into one
+        tree, so they are never drawn as one either.
+        '''
+        import numpy as np
+
+        edges_net = self.edges_net
+        per_edge_leaves = getattr(self, 'dendrogram_leaves', 'bundles') == 'edges'
+
+        if not per_edge_leaves:
+            return [
+                self._prepare_dendrogram_panel(
+                    edges_net, self.linkage_matrix, False, "FCN Dendrogram"
+                )
+            ]
+
+        linkage_matrices = self.linkage_matrices or {}
+        panels = []
+        for parent_id in sorted(np.unique(edges_net[:, NETWORK_COL]).astype(int).tolist()):
+            parent_edges = edges_net[edges_net[:, NETWORK_COL] == parent_id]
+            Z = linkage_matrices.get(parent_id)
+            if Z is None or len(Z) == 0:
+                continue
+            panels.append(self._prepare_dendrogram_panel(
+                parent_edges, Z, True,
+                f"Sub-bundle Dendrogram (v3 divisive) — parent bundle {parent_id}",
+            ))
+        return panels
+
 
     def show_dendrogram(self):
         if self.edges_net is None:
             QMessageBox.warning(self, "No Data", "Load data first.")
             return
-        prepared_data = self.prepare_dendrogram_plot_data()
-        title = (
-            "Sub-bundle Dendrogram (v3 divisive)"
-            if getattr(self, 'dendrogram_leaves', 'bundles') == 'edges'
-            else "FCN Dendrogram"
-        )
-        show_dendrogram(
-            Z=self.linkage_matrix,
-            labels=prepared_data["labels"],
-            cut_distance=prepared_data["cut_distance"],
-            fcn_to_color=prepared_data["fcn_to_color"],
-            bundle_to_color=prepared_data["bundle_to_color"],
-            title=title,
-            **prepared_data["truncate_kwargs"],
-        )
+        panels = self.prepare_dendrogram_plot_data()
+        if not panels:
+            QMessageBox.information(
+                self, "No Dendrogram",
+                "No linkage tree is available to plot (nothing to link).",
+            )
+            return
+        # v1/v2 always produce one panel; v3 produces one PER PARENT bundle,
+        # since each parent bundle has its own independent tree that must
+        # never be drawn merged with another parent's -- each panel opens
+        # its own figure window.
+        for panel in panels:
+            show_dendrogram(
+                Z=panel["Z"],
+                labels=panel["labels"],
+                cut_distance=panel["cut_distance"],
+                fcn_to_color=panel["fcn_to_color"],
+                bundle_to_color=panel["bundle_to_color"],
+                title=panel["title"],
+                **panel["truncate_kwargs"],
+            )
  
